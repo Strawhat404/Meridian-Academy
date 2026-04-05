@@ -1,9 +1,12 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
 FROM rust:1.87-bookworm AS builder
 
-# Install wasm target and trunk
+# Install wasm target
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install trunk --locked
+
+# Install trunk from pre-built binary (avoids OOM from compiling trunk from source)
+RUN curl -L https://github.com/trunk-rs/trunk/releases/download/v0.21.7/trunk-x86_64-unknown-linux-gnu.tar.gz \
+    | tar -xz -C /usr/local/bin
 
 WORKDIR /build
 
