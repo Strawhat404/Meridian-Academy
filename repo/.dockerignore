@@ -1,0 +1,19 @@
+# Git history — not needed in build context
+.git/
+.gitignore
+
+# Exclude all of target EXCEPT the release binary we need
+target/
+!target/release/backend
+
+# Exclude all of frontend/dist is NOT excluded — Dockerfile needs it
+# (frontend/dist is intentionally kept in Docker context)
+
+# Secrets
+.env
+
+# Audit working files
+.tmp/
+
+# OS
+.DS_Store

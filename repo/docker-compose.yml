@@ -1,0 +1,73 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: meridian_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-meridian_academy}
+      MYSQL_USER: ${MYSQL_USER:-meridian_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-meridian_pass}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - meridian_net
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: meridian_backend
+    environment:
+      DATABASE_URL: mysql://${MYSQL_USER:-meridian_user}:${MYSQL_PASSWORD:-meridian_pass}@mysql:3306/${MYSQL_DATABASE:-meridian_academy}
+      ROCKET_PORT: 8000
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_SECRET_KEY: ${ROCKET_SECRET_KEY:-random_secret_key_change_in_production_at_least_32_bytes_long!!}
+      JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production_must_be_long}
+      TOKEN_EXPIRY_HOURS: ${TOKEN_EXPIRY_HOURS:-24}
+      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-60}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - meridian_net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: meridian_frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:8000
+    networks:
+      - meridian_net
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  meridian_net:
+    driver: bridge

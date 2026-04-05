@@ -1,0 +1,19 @@
+# Rust build artifacts
+target/
+
+# Compiled frontend WASM bundle
+frontend/dist/
+
+# Environment secrets — only .env.example should be committed
+.env
+
+# Runtime file uploads
+uploads/
+
+# Audit working files
+.tmp/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
