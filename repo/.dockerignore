@@ -1,13 +1,10 @@
-# Git history — not needed in build context
+# Git history
 .git/
 .gitignore
 
-# Exclude all of target EXCEPT the release binary we need
+# Local build artifacts — Docker builds from source, doesn't need these
 target/
-!target/release/backend
-
-# Exclude all of frontend/dist is NOT excluded — Dockerfile needs it
-# (frontend/dist is intentionally kept in Docker context)
+frontend/dist/
 
 # Secrets
 .env
