@@ -33,7 +33,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production_must_be_long}
       TOKEN_EXPIRY_HOURS: ${TOKEN_EXPIRY_HOURS:-24}
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-60}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "8000:8000"
