@@ -11,7 +11,7 @@ hashgen/
 uploads/
 
 # Audit working files
-.tmp/
+
 
 # OS / editor
 .DS_Store

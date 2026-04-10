@@ -1,2 +1,6 @@
 # Audit working files — kept locally but not committed
-.tmp/
+
+
+# Utility/scratch crates not part of the deliverable
+hashgen/
+trajectory,json
