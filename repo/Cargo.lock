@@ -220,6 +220,7 @@ dependencies = [
  "rand 0.8.5",
  "rocket",
  "rocket_cors",
+ "rust_decimal",
  "rusttype",
  "serde",
  "serde_json",

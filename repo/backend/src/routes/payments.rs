@@ -5,7 +5,6 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 use uuid::Uuid;
-use rust_decimal::Decimal;
 
 #[post("/", data = "<req>")]
 pub async fn create_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: Json<CreatePaymentRequest>) -> Result<Json<Payment>, Status> {
@@ -22,7 +21,7 @@ pub async fn create_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
     }
 
     // Idempotency check — if this key already exists, return the existing payment
-    let existing = sqlx::query_as::<_, (String, String, String, String, rust_decimal::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
+    let existing = sqlx::query_as::<_, (String, String, String, String, sqlx::types::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, idempotency_key, payment_method, amount, transaction_type, reference_payment_id, status, check_number, notes, processed_by, created_at, updated_at FROM payments WHERE idempotency_key = ?"
     )
     .bind(&req.idempotency_key)
@@ -92,7 +91,7 @@ pub async fn refund_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
 
     if let Some(existing_id) = existing {
         // Idempotent: return the existing refund payment (HTTP 200, not a double-charge)
-        let existing_row = sqlx::query_as::<_, (String, String, String, String, rust_decimal::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
+        let existing_row = sqlx::query_as::<_, (String, String, String, String, sqlx::types::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
             "SELECT id, order_id, idempotency_key, payment_method, amount, transaction_type, reference_payment_id, status, check_number, notes, processed_by, created_at, updated_at FROM payments WHERE id = ?"
         ).bind(&existing_id).fetch_one(pool.inner()).await.map_err(|e| { log::error!("refund_payment: select existing refund failed: {}", e); Status::InternalServerError })?;
         let (id, oid, ik, pm, amount, tt, rpi, status, cn, notes, pb, ca, ua) = existing_row;
@@ -104,7 +103,7 @@ pub async fn refund_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
     }
 
     // Get original payment
-    let orig = sqlx::query_as::<_, (String, String, rust_decimal::Decimal, String)>(
+    let orig = sqlx::query_as::<_, (String, String, sqlx::types::Decimal, String)>(
         "SELECT id, order_id, amount, status FROM payments WHERE id = ?"
     )
     .bind(&req.original_payment_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("refund_payment: select original payment failed: {}", e); Status::InternalServerError })?;
@@ -163,7 +162,7 @@ pub async fn list_payments(pool: &State<DbPool>, user: AuthenticatedUser, order_
         }
     }
 
-    let rows = sqlx::query_as::<_, (String, String, String, String, rust_decimal::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, sqlx::types::Decimal, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, idempotency_key, payment_method, amount, transaction_type, reference_payment_id, status, check_number, notes, processed_by, created_at, updated_at FROM payments WHERE order_id = ? ORDER BY created_at DESC"
     )
     .bind(&order_id).fetch_all(pool.inner()).await.map_err(|e| { log::error!("list_payments: select payments query failed: {}", e); Status::InternalServerError })?;
