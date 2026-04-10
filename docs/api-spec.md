@@ -1,244 +1,167 @@
-# Meridian Academy — REST API Specification
+# Meridian Academy API Specification
 
-All endpoints are served by the Rocket backend at `http://localhost:8000/api`.
+Base URL: `http://localhost:8000`
 
-Authentication uses a session token passed as a Bearer token in the `Authorization` header.
+## Authentication
 
----
+All endpoints except `POST /api/auth/login`, `POST /api/auth/use-reset-token`, and `GET /health` require a Bearer token in the `Authorization` header.
 
-## Auth
+Sessions expire after 30 minutes of idle time. The idle timer is refreshed on each authenticated request.
+
+### Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | No | Health check |
+| POST | `/api/auth/login` | No | Login with username/password |
+| POST | `/api/auth/provision` | Admin | Provision a new user account |
+| GET | `/api/auth/me` | Yes | Get current user profile |
+| POST | `/api/auth/change-password` | Yes | Change own password |
+| POST | `/api/auth/generate-reset-token` | Admin | Generate one-time password reset token (60 min expiry) |
+| POST | `/api/auth/use-reset-token` | No | Use reset token to set new password |
+| POST | `/api/auth/request-deletion` | Yes | Request 30-day soft-delete hold |
+| POST | `/api/auth/cancel-deletion` | Yes | Cancel pending deletion |
+| GET | `/api/auth/export-my-data` | Yes | Download own data as JSON archive |
+| POST | `/api/auth/logout` | Yes | Invalidate current session |
 
 ### POST /api/auth/login
-Login with username and password.
+```json
+{ "username": "string", "password": "string" }
+```
+Response: `{ "token": "jwt", "user": { ... } }`
 
-Request: `{ "username": string, "password": string }`
-Response: `{ "token": string, "user": { "id", "username", "role" } }`
-Errors: 401 (invalid credentials), 423 (account locked)
+### POST /api/auth/provision
+```json
+{ "username": "string", "email": "string", "password": "string", "first_name": "string", "last_name": "string", "role": "student|instructor|academic_staff|administrator" }
+```
 
-### POST /api/auth/logout
-Invalidate the current session token.
-
-Response: `{ "success": true }`
-
-### POST /api/auth/reset-password
-Use a one-time reset token to set a new password.
-
-Request: `{ "token": string, "new_password": string }`
-Response: `{ "success": true }`
-Errors: 400 (token expired or invalid)
-
-### GET /api/auth/me
-Get the current authenticated user.
-
-Response: `{ "id", "username", "role", "email" }`
-
----
+### POST /api/auth/use-reset-token
+```json
+{ "token": "string", "new_password": "string" }
+```
 
 ## Users
 
-### GET /api/users
-Admin only. List all users with pagination.
-
-Query: `?page=1&per_page=20&role=student`
-
-### GET /api/users/:id
-Get user profile. Users can only access their own; admins can access any.
-
-### PUT /api/users/:id
-Update profile fields (name, email).
-
-### DELETE /api/users/:id
-Soft-delete user account (30-day hold).
-
-### GET /api/users/:id/export
-Export all of the user's own data as a downloadable JSON archive.
-
-### GET /api/users/:id/addresses
-List shipping addresses for a user.
-
-### POST /api/users/:id/addresses
-Add a new shipping address.
-
-### PUT /api/users/:id/addresses/:addr_id
-Update an address. Set `"is_default": true` to make it the default.
-
-### DELETE /api/users/:id/addresses/:addr_id
-Remove an address.
-
----
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/users` | Admin/Staff | List all users |
+| GET | `/api/users/<id>` | Owner/Admin/Staff | Get user by ID |
+| PUT | `/api/users/profile` | Yes | Update own profile |
+| PUT | `/api/users/notification-prefs` | Yes | Update notification preferences |
+| PUT | `/api/users/<id>/role` | Admin | Change user role |
+| DELETE | `/api/users/<id>` | Admin | Deactivate user |
+| GET | `/api/users/addresses` | Yes | List own addresses |
+| POST | `/api/users/addresses` | Yes | Add shipping address |
+| PUT | `/api/users/addresses/default` | Yes | Set default address |
+| DELETE | `/api/users/addresses/<id>` | Yes | Delete address |
+| GET | `/api/users/notifications` | Yes | Get notification inbox |
+| PUT | `/api/users/notifications/<id>/read` | Yes | Mark notification read |
 
 ## Submissions
 
-### GET /api/submissions
-List submissions. Students see own; instructors see their courses'; admins see all.
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/submissions/templates` | No | List guided submission templates with type-specific fields |
+| POST | `/api/submissions` | Student/Instructor | Create submission (title <= 120 chars, summary <= 500 chars) |
+| GET | `/api/submissions` | Yes | List submissions (scoped by role) |
+| GET | `/api/submissions/<id>` | Owner/Admin/Staff | Get submission (IDOR enforced) |
+| PUT | `/api/submissions/<id>` | Owner/Admin/Staff | Update submission |
+| POST | `/api/submissions/<id>/versions` | Owner | Submit file version (max 10, PDF/DOCX/PNG/JPG, 25MB, magic-byte verified) |
+| GET | `/api/submissions/<id>/versions` | Owner/Admin/Staff | List version history (timestamps in MM/DD/YYYY 12h format) |
+| GET | `/api/submissions/<id>/versions/<n>/download` | Owner/Admin/Staff | Download with watermark |
+| GET | `/api/submissions/my` | Yes | List own submissions |
+| POST | `/api/submissions/<id>/approve` | Staff/Admin | Approve blocked submission |
 
-### POST /api/submissions
-Create a new submission draft.
-
-Request: `{ "title": string, "template_id": string, "deadline": string }`
-
-### GET /api/submissions/:id
-Get submission with full version history.
-
-### POST /api/submissions/:id/versions
-Submit a new version (resubmit). Max 10 versions before deadline.
-
-Request: multipart form with fields + file attachments.
-
-### GET /api/submissions/:id/versions/:version/download
-Download a specific version. Response includes watermark metadata in headers.
-
----
+### POST /api/submissions/<id>/versions
+```json
+{ "file_name": "paper.pdf", "file_data": "base64...", "form_data": "optional JSON" }
+```
 
 ## Orders
 
-### GET /api/orders
-List orders for the current user (or all for admin).
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/orders` | Yes | Create order (monthly/quarterly/annual, multiple line items) |
+| GET | `/api/orders` | Yes | List orders (scoped by role) |
+| GET | `/api/orders/<id>` | Owner/Admin/Staff | Get order with line items |
+| PUT | `/api/orders/<id>/status` | Admin/Staff | Update order status |
+| GET | `/api/orders/my` | Yes | List own orders |
+| POST | `/api/orders/split` | Admin/Staff | Split order by series |
+| POST | `/api/orders/merge` | Admin/Staff | Merge orders from same user |
+| POST | `/api/orders/fulfillment` | Admin/Staff | Log fulfillment event (reason required) |
+| GET | `/api/orders/<id>/fulfillment` | Owner/Admin/Staff | List fulfillment events |
+| GET | `/api/orders/<id>/reconciliation` | Owner/Admin/Staff | Get reconciliation records |
+| PUT | `/api/orders/reconciliation/<id>` | Admin/Staff | Update reconciliation record |
+| POST | `/api/orders/clear-flag` | Admin/Staff | Clear abnormal order flag |
+| GET | `/api/orders/flagged` | Admin/Staff | List flagged orders |
 
 ### POST /api/orders
-Create a new subscription order.
-
-Request: `{ "period": "monthly|quarterly|annual", "lines": [{ "series_id", "quantity" }] }`
-
-### GET /api/orders/:id
-Get order details with line items and fulfillment events.
-
-### POST /api/orders/:id/split
-Split an order containing multiple series into separate orders.
-
-### POST /api/orders/merge
-Merge multiple orders from the same subscriber.
-
-Request: `{ "order_ids": [string] }`
-
-### GET /api/orders/:id/reconciliation
-Get reconciliation view: expected vs. actual receipt per issue.
-
-### POST /api/orders/:id/fulfillment-events
-Log a fulfillment event.
-
-Request: `{ "event_type": "missing|reshipment|delay|discontinuation|edition_change", "issue_id": string, "reason": string }`
-
----
+```json
+{ "subscription_period": "monthly|quarterly|annual", "shipping_address_id": "optional", "line_items": [{ "publication_title": "string", "series_name": "optional", "quantity": 1, "unit_price": 29.99 }] }
+```
 
 ## Reviews
 
-### GET /api/reviews
-List reviews. Users see own; admins see all.
-
-### POST /api/reviews
-Post an initial review.
-
-Request: multipart with `{ "order_id", "rating", "body" }` + up to 6 images (5 MB each).
-
-### POST /api/reviews/:id/followup
-Post a follow-up (within 14 days of original review, one per review).
-
-### GET /api/reviews/:id
-Get review with follow-up and images.
-
----
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/reviews` | Yes | Create review (rating 1-5, title <= 120, order must be delivered) |
+| POST | `/api/reviews/followup` | Yes | Follow-up review (1 per original, within 14 days) |
+| GET | `/api/reviews` | Yes | List reviews (own for users, all for staff) |
+| GET | `/api/reviews/<id>` | Owner/OrderOwner/Staff | Get review |
+| POST | `/api/reviews/<id>/images` | Owner | Upload image (max 6, 5MB each) |
+| GET | `/api/reviews/my` | Yes | List own reviews |
 
 ## After-Sales Cases
 
-### GET /api/cases
-List after-sales cases for current user (or all for admin/staff).
+Status workflow: `submitted -> in_review -> awaiting_evidence -> arbitrated -> approved/denied -> closed`
 
-### POST /api/cases
-Open a new case.
+SLA: First response within 2 business days (skips weekends), resolution target 7 business days.
 
-Request: `{ "order_id": string, "case_type": "return|refund|exchange", "description": string }`
-
-### GET /api/cases/:id
-Get case details with status history and SLA timers.
-
-### PUT /api/cases/:id/status
-Update case status (staff/admin only).
-
-Request: `{ "status": "in_review|awaiting_evidence|arbitrated|approved|denied|closed", "note": string }`
-
----
-
-## Content
-
-### GET /api/content
-List content items.
-
-### POST /api/content
-Create a content draft. Triggers metadata governance on save.
-
-Request: `{ "title": string, "summary": string, "body": string, "tags": [string] }`
-
-### PUT /api/content/:id
-Update content. Re-runs governance validation.
-
-### POST /api/content/:id/submit
-Submit for review (Academic Staff approval required if flagged).
-
-### POST /api/content/:id/approve
-Academic Staff or Admin approves and publishes content.
-
-### POST /api/content/:id/reject
-Reject content with a reason.
-
-### GET /api/content/:id/versions
-Get version history.
-
-### POST /api/content/:id/rollback/:version
-Roll back to a previous version.
-
----
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/cases` | Yes | Create case (return/refund/exchange) |
+| GET | `/api/cases` | Yes | List cases (scoped by role) |
+| GET | `/api/cases/<id>` | Reporter/Staff | Get case with SLA timers |
+| PUT | `/api/cases/<id>/status` | Staff/Admin | Transition case status |
+| PUT | `/api/cases/<id>/assign` | Staff/Admin | Assign case to staff |
+| POST | `/api/cases/<id>/comments` | Reporter/Assigned/Staff | Add comment (IDOR enforced) |
+| GET | `/api/cases/<id>/comments` | Reporter/Staff | List comments |
+| GET | `/api/cases/my` | Yes | List own cases |
 
 ## Payments
 
-### GET /api/payments
-List payment transactions (admin only).
+Methods: cash, check, on_account. Idempotent by `idempotency_key`. Third-party gateways disabled by default.
 
-### POST /api/payments
-Record a new transaction.
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/payments` | Staff/Admin | Create payment (charge/hold/release/refund) |
+| POST | `/api/payments/refund` | Staff/Admin | Refund against prior payment (idempotent) |
+| GET | `/api/payments/order/<id>` | Owner/Staff | List payments for order |
+| GET | `/api/payments/reconciliation-report` | Admin | On-demand reconciliation report (also auto-generated nightly by background scheduler) |
+| GET | `/api/payments/abnormal-flags` | Staff/Admin | List abnormal order flags |
+| POST | `/api/payments/abnormal-flags/<id>/clear` | Staff/Admin | Clear flag |
 
-Request: `{ "order_id": string, "method": "cash|check|on_account", "amount_cents": number, "idempotency_key": string }`
+## Content Governance
 
-### POST /api/payments/:id/refund
-Issue a refund against a prior transaction.
-
-### GET /api/payments/reconciliation
-Get nightly reconciliation report.
-
----
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/content/sensitive-words` | Admin | List sensitive word dictionary |
+| POST | `/api/content/sensitive-words` | Admin | Add word (replace/block) |
+| DELETE | `/api/content/sensitive-words/<id>` | Admin | Remove word |
+| POST | `/api/content/check` | Staff/Admin | Check text against dictionary |
+| POST | `/api/content/items/<id>/submit` | Owner | Submit draft for review |
+| POST | `/api/content/items/<id>/approve` | Staff/Admin | Approve content |
+| POST | `/api/content/items/<id>/reject` | Staff/Admin | Reject content |
+| POST | `/api/content/items/<id>/request-revision` | Staff/Admin | Request revision |
+| POST | `/api/content/items/<id>/publish` | Staff/Admin | Publish accepted content |
+| POST | `/api/content/items/<id>/rollback/<version>` | Owner/Staff/Admin | Rollback to previous version |
 
 ## Admin
 
-### GET /api/admin/users
-List all users with roles and status.
-
-### POST /api/admin/users/:id/reset-token
-Generate a one-time password reset token (60-minute expiry).
-
-### PUT /api/admin/users/:id/role
-Change a user's role. Logged to audit trail.
-
-### GET /api/admin/audit-logs
-Get immutable audit log entries with pagination.
-
-### GET /api/admin/sensitive-words
-List sensitive words in the local dictionary.
-
-### POST /api/admin/sensitive-words
-Add a sensitive word with policy (replace or block).
-
-### DELETE /api/admin/sensitive-words/:id
-Remove a sensitive word.
-
-### GET /api/admin/flagged-orders
-List orders flagged for manual review (abnormal patterns).
-
-### POST /api/admin/flagged-orders/:id/clear
-Clear a flag and allow the order to proceed.
-
----
-
-## Health
-
-### GET /health
-Returns 200 OK. Used by Docker healthcheck.
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/admin/dashboard` | Admin | Dashboard statistics |
+| GET | `/api/admin/audit-log` | Admin | Immutable audit log (last 200 entries, returns `{ "logs": [...] }`) |
+| GET | `/api/admin/audit-logs` | Admin | Same as above, returns flat array (used by frontend) |
+| GET | `/api/admin/settings` | Admin | System settings and constants |
+| POST | `/api/admin/cleanup-soft-deleted` | Admin | Permanently delete expired soft-deleted users |

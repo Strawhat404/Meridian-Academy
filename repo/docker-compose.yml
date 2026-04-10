@@ -32,7 +32,7 @@ services:
       ROCKET_SECRET_KEY: ${ROCKET_SECRET_KEY:-random_secret_key_change_in_production_at_least_32_bytes_long!!}
       JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production_must_be_long}
       TOKEN_EXPIRY_HOURS: ${TOKEN_EXPIRY_HOURS:-24}
-      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-60}
+      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-30}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       RUST_LOG: ${RUST_LOG:-info}
     ports:

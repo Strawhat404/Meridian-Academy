@@ -43,7 +43,7 @@ pub async fn audit_log(pool: &State<DbPool>, user: AuthenticatedUser) -> Result<
     let rows = sqlx::query_as::<_, (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, user_id, action, target_type, target_id, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT 200"
     )
-    .fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .fetch_all(pool.inner()).await.map_err(|e| { log::error!("audit_log: select audit_log query failed: {}", e); Status::InternalServerError })?;
 
     let logs: Vec<serde_json::Value> = rows.into_iter().map(|(id, uid, action, tt, tid, details, ca)| {
         json!({ "id": id, "user_id": uid, "action": action, "target_type": tt, "target_id": tid, "details": details, "created_at": ca })
@@ -60,7 +60,7 @@ pub async fn audit_logs(pool: &State<DbPool>, user: AuthenticatedUser) -> Result
     let rows = sqlx::query_as::<_, (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, user_id, action, target_type, target_id, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT 200"
     )
-    .fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .fetch_all(pool.inner()).await.map_err(|e| { log::error!("audit_logs: select audit_log query failed: {}", e); Status::InternalServerError })?;
 
     let logs: Vec<serde_json::Value> = rows.into_iter().map(|(id, uid, action, tt, tid, details, ca)| {
         json!({ "id": id, "user_id": uid, "action": action, "target_type": tt, "target_id": tid, "details": details, "created_at": ca })
@@ -105,7 +105,7 @@ pub async fn cleanup_soft_deleted(pool: &State<DbPool>, user: AuthenticatedUser)
     user.require_permission("admin.dashboard")?;
 
     let result = sqlx::query("DELETE FROM users WHERE deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at <= NOW()")
-        .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .execute(pool.inner()).await.map_err(|e| { log::error!("cleanup_soft_deleted: delete expired users failed: {}", e); Status::InternalServerError })?;
 
     Ok(Json(json!({
         "deleted_count": result.rows_affected()

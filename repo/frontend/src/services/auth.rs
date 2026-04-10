@@ -73,7 +73,9 @@ pub fn get_token() -> Option<String> {
     LocalStorage::get::<String>("auth_token").ok()
 }
 
-pub fn logout() {
+pub async fn logout() {
+    // Invalidate server-side session before clearing local state
+    let _ = api::post_no_body("/api/auth/logout").await;
     let _ = LocalStorage::delete("auth_token");
     let _ = LocalStorage::delete("current_user");
 }

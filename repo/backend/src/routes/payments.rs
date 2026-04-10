@@ -27,7 +27,7 @@ pub async fn create_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
     .bind(&req.idempotency_key)
     .fetch_optional(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("create_payment: idempotency check query failed: {}", e); Status::InternalServerError })?;
 
     if let Some((id, oid, ik, pm, amount, tt, rpi, status, cn, notes, pb, ca, ua)) = existing {
         return Ok(Json(Payment {
@@ -52,21 +52,21 @@ pub async fn create_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
     .bind(&id).bind(&req.order_id).bind(&req.idempotency_key).bind(&req.payment_method)
     .bind(req.amount).bind(&req.transaction_type).bind(&req.reference_payment_id)
     .bind(status).bind(&req.check_number).bind(&req.notes).bind(&user.user_id)
-    .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .execute(pool.inner()).await.map_err(|e| { log::error!("create_payment: insert payment failed: {}", e); Status::InternalServerError })?;
 
     // Update order payment status
     match req.transaction_type.as_str() {
         "charge" => {
             sqlx::query("UPDATE orders SET payment_status = 'paid', updated_at = NOW() WHERE id = ?")
-                .bind(&req.order_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&req.order_id).execute(pool.inner()).await.map_err(|e| { log::error!("create_payment: update order payment_status to paid failed: {}", e); Status::InternalServerError })?;
         }
         "hold" => {
             sqlx::query("UPDATE orders SET payment_status = 'held', updated_at = NOW() WHERE id = ?")
-                .bind(&req.order_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&req.order_id).execute(pool.inner()).await.map_err(|e| { log::error!("create_payment: update order payment_status to held failed: {}", e); Status::InternalServerError })?;
         }
         "refund" => {
             sqlx::query("UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE id = ?")
-                .bind(&req.order_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&req.order_id).execute(pool.inner()).await.map_err(|e| { log::error!("create_payment: update order payment_status to refunded failed: {}", e); Status::InternalServerError })?;
         }
         _ => {}
     }
@@ -87,13 +87,13 @@ pub async fn refund_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
 
     // Idempotency check
     let existing = sqlx::query_scalar::<_, String>("SELECT id FROM payments WHERE idempotency_key = ?")
-        .bind(&req.idempotency_key).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&req.idempotency_key).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("refund_payment: idempotency check query failed: {}", e); Status::InternalServerError })?;
 
     if let Some(existing_id) = existing {
         // Idempotent: return the existing refund payment (HTTP 200, not a double-charge)
         let existing_row = sqlx::query_as::<_, (String, String, String, String, f64, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
             "SELECT id, order_id, idempotency_key, payment_method, amount, transaction_type, reference_payment_id, status, check_number, notes, processed_by, created_at, updated_at FROM payments WHERE id = ?"
-        ).bind(&existing_id).fetch_one(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        ).bind(&existing_id).fetch_one(pool.inner()).await.map_err(|e| { log::error!("refund_payment: select existing refund failed: {}", e); Status::InternalServerError })?;
         let (id, oid, ik, pm, amount, tt, rpi, status, cn, notes, pb, ca, ua) = existing_row;
         return Ok(Json(Payment {
             id, order_id: oid, idempotency_key: ik, payment_method: pm, amount,
@@ -106,7 +106,7 @@ pub async fn refund_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
     let orig = sqlx::query_as::<_, (String, String, f64, String)>(
         "SELECT id, order_id, amount, status FROM payments WHERE id = ?"
     )
-    .bind(&req.original_payment_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .bind(&req.original_payment_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("refund_payment: select original payment failed: {}", e); Status::InternalServerError })?;
 
     match orig {
         Some((orig_id, order_id, orig_amount, orig_status)) => {
@@ -124,15 +124,15 @@ pub async fn refund_payment(pool: &State<DbPool>, user: AuthenticatedUser, req: 
             )
             .bind(&id).bind(&order_id).bind(&req.idempotency_key).bind(req.amount)
             .bind(&orig_id).bind(&req.reason).bind(&user.user_id)
-            .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .execute(pool.inner()).await.map_err(|e| { log::error!("refund_payment: insert refund payment failed: {}", e); Status::InternalServerError })?;
 
             // Update order payment status
             if (req.amount - orig_amount).abs() < 0.01 {
                 sqlx::query("UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE id = ?")
-                    .bind(&order_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&order_id).execute(pool.inner()).await.map_err(|e| { log::error!("refund_payment: update order status to refunded failed: {}", e); Status::InternalServerError })?;
             } else {
                 sqlx::query("UPDATE orders SET payment_status = 'partial_refund', updated_at = NOW() WHERE id = ?")
-                    .bind(&order_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&order_id).execute(pool.inner()).await.map_err(|e| { log::error!("refund_payment: update order status to partial_refund failed: {}", e); Status::InternalServerError })?;
             }
 
             Ok(Json(Payment {
@@ -153,7 +153,7 @@ pub async fn list_payments(pool: &State<DbPool>, user: AuthenticatedUser, order_
     if !user.is_privileged() {
         // Users can see payments for their own orders
         let owner = sqlx::query_scalar::<_, String>("SELECT user_id FROM orders WHERE id = ?")
-            .bind(&order_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(&order_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("list_payments: select order owner failed: {}", e); Status::InternalServerError })?;
         match owner {
             Some(uid) if uid != user.user_id => return Err(Status::Forbidden),
             None => return Err(Status::NotFound),
@@ -164,7 +164,7 @@ pub async fn list_payments(pool: &State<DbPool>, user: AuthenticatedUser, order_
     let rows = sqlx::query_as::<_, (String, String, String, String, f64, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, idempotency_key, payment_method, amount, transaction_type, reference_payment_id, status, check_number, notes, processed_by, created_at, updated_at FROM payments WHERE order_id = ? ORDER BY created_at DESC"
     )
-    .bind(&order_id).fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .bind(&order_id).fetch_all(pool.inner()).await.map_err(|e| { log::error!("list_payments: select payments query failed: {}", e); Status::InternalServerError })?;
 
     let payments: Vec<Payment> = rows.into_iter().map(|(id, oid, ik, pm, amount, tt, rpi, status, cn, notes, pb, ca, ua)| {
         Payment { id, order_id: oid, idempotency_key: ik, payment_method: pm, amount, transaction_type: tt, reference_payment_id: rpi, status, check_number: cn, notes, processed_by: pb, created_at: ca, updated_at: ua }
@@ -214,7 +214,7 @@ pub async fn list_abnormal_flags(pool: &State<DbPool>, user: AuthenticatedUser) 
     let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, String, String, bool, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, user_id, flag_type, reason, is_cleared, cleared_by, cleared_at, created_at FROM abnormal_order_flags ORDER BY created_at DESC"
     )
-    .fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .fetch_all(pool.inner()).await.map_err(|e| { log::error!("list_abnormal_flags: select flags query failed: {}", e); Status::InternalServerError })?;
 
     let flags: Vec<AbnormalOrderFlag> = rows.into_iter().map(|(id, oid, uid, ft, reason, cleared, cb, cat, ca)| {
         AbnormalOrderFlag { id, order_id: oid, user_id: uid, flag_type: ft, reason, is_cleared: cleared, cleared_by: cb, cleared_at: cat, created_at: ca }
@@ -228,7 +228,7 @@ pub async fn clear_abnormal_flag(pool: &State<DbPool>, user: AuthenticatedUser, 
     user.require_permission("payments.manage")?;
 
     sqlx::query("UPDATE abnormal_order_flags SET is_cleared = true, cleared_by = ?, cleared_at = NOW() WHERE id = ?")
-        .bind(&user.user_id).bind(&flag_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&user.user_id).bind(&flag_id).execute(pool.inner()).await.map_err(|e| { log::error!("clear_abnormal_flag: update flag failed: {}", e); Status::InternalServerError })?;
 
     Ok(Status::Ok)
 }

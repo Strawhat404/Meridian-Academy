@@ -16,7 +16,7 @@ pub async fn list_sensitive_words(pool: &State<DbPool>, user: AuthenticatedUser)
     let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String)>(
         "SELECT id, word, action, replacement, added_by FROM sensitive_words ORDER BY word"
     )
-    .fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .fetch_all(pool.inner()).await.map_err(|e| { log::error!("list_sensitive_words: select words query failed: {}", e); Status::InternalServerError })?;
 
     let words: Vec<SensitiveWord> = rows.into_iter().map(|(id, word, action, replacement, added_by)| {
         SensitiveWord { id, word, action, replacement, added_by }
@@ -40,7 +40,7 @@ pub async fn add_sensitive_word(pool: &State<DbPool>, user: AuthenticatedUser, r
         "INSERT INTO sensitive_words (id, word, action, replacement, added_by, created_at) VALUES (?, ?, ?, ?, ?, NOW())"
     )
     .bind(&id).bind(&req.word).bind(&req.action).bind(&req.replacement).bind(&user.user_id)
-    .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .execute(pool.inner()).await.map_err(|e| { log::error!("add_sensitive_word: insert word failed: {}", e); Status::InternalServerError })?;
 
     let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'sensitive_word_added', 'sensitive_word', ?, ?, NOW())")
         .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&id)
@@ -58,7 +58,7 @@ pub async fn remove_sensitive_word(pool: &State<DbPool>, user: AuthenticatedUser
     user.require_permission("content.manage")?;
 
     sqlx::query("DELETE FROM sensitive_words WHERE id = ?")
-        .bind(&word_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&word_id).execute(pool.inner()).await.map_err(|e| { log::error!("remove_sensitive_word: delete word failed: {}", e); Status::InternalServerError })?;
 
     let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'sensitive_word_removed', 'sensitive_word', ?, 'Sensitive word removed', NOW())")
         .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&word_id)
@@ -86,7 +86,7 @@ pub async fn check_content(pool: &State<DbPool>, user: AuthenticatedUser, req: J
 pub async fn submit_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id: String) -> Result<Status, Status> {
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT author_id, status FROM submissions WHERE id = ?"
-    ).bind(&item_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    ).bind(&item_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("submit_item: select submission failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some((author_id, status)) => {
@@ -95,7 +95,7 @@ pub async fn submit_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id:
                 return Err(Status::Conflict);
             }
             sqlx::query("UPDATE submissions SET status = 'submitted', updated_at = NOW() WHERE id = ?")
-                .bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("submit_item: update status to submitted failed: {}", e); Status::InternalServerError })?;
             Ok(Status::Ok)
         }
         None => Err(Status::NotFound),
@@ -108,12 +108,12 @@ pub async fn approve_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id
     user.require_permission("submissions.review")?;
 
     let status = sqlx::query_scalar::<_, String>("SELECT status FROM submissions WHERE id = ?")
-        .bind(&item_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&item_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("approve_item: select status failed: {}", e); Status::InternalServerError })?;
 
     match status {
         Some(s) if s == "submitted" || s == "in_review" || s == "blocked" => {
             sqlx::query("UPDATE submissions SET status = 'accepted', updated_at = NOW() WHERE id = ?")
-                .bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("approve_item: update status to accepted failed: {}", e); Status::InternalServerError })?;
 
             let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'content_approved', 'submission', ?, 'Content item approved', NOW())")
                 .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&item_id)
@@ -131,12 +131,12 @@ pub async fn reject_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id:
     user.require_permission("submissions.review")?;
 
     let status = sqlx::query_scalar::<_, String>("SELECT status FROM submissions WHERE id = ?")
-        .bind(&item_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&item_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("reject_item: select status failed: {}", e); Status::InternalServerError })?;
 
     match status {
         Some(s) if s == "submitted" || s == "in_review" => {
             sqlx::query("UPDATE submissions SET status = 'rejected', updated_at = NOW() WHERE id = ?")
-                .bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("reject_item: update status to rejected failed: {}", e); Status::InternalServerError })?;
 
             let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'content_rejected', 'submission', ?, 'Content item rejected', NOW())")
                 .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&item_id)
@@ -154,7 +154,7 @@ pub async fn request_revision(pool: &State<DbPool>, user: AuthenticatedUser, ite
     user.require_permission("submissions.review")?;
 
     sqlx::query("UPDATE submissions SET status = 'revision_requested', updated_at = NOW() WHERE id = ? AND status IN ('submitted', 'in_review')")
-        .bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("request_revision: update status to revision_requested failed: {}", e); Status::InternalServerError })?;
     Ok(Status::Ok)
 }
 
@@ -164,7 +164,7 @@ pub async fn publish_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id
     user.require_permission("submissions.review")?;
 
     sqlx::query("UPDATE submissions SET status = 'published', updated_at = NOW() WHERE id = ? AND status = 'accepted'")
-        .bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("publish_item: update status to published failed: {}", e); Status::InternalServerError })?;
     Ok(Status::Ok)
 }
 
@@ -173,7 +173,7 @@ pub async fn publish_item(pool: &State<DbPool>, user: AuthenticatedUser, item_id
 pub async fn rollback_version(pool: &State<DbPool>, user: AuthenticatedUser, item_id: String, version_number: i32) -> Result<Status, Status> {
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT author_id, status FROM submissions WHERE id = ?"
-    ).bind(&item_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    ).bind(&item_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("rollback_version: select submission failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some((author_id, _status)) => {
@@ -187,7 +187,7 @@ pub async fn rollback_version(pool: &State<DbPool>, user: AuthenticatedUser, ite
             if exists == 0 { return Err(Status::NotFound); }
 
             sqlx::query("UPDATE submissions SET current_version = ?, status = 'draft', updated_at = NOW() WHERE id = ?")
-                .bind(version_number).bind(&item_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(version_number).bind(&item_id).execute(pool.inner()).await.map_err(|e| { log::error!("rollback_version: update current_version failed: {}", e); Status::InternalServerError })?;
 
             let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'content_rollback', 'submission', ?, ?, NOW())")
                 .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&item_id)

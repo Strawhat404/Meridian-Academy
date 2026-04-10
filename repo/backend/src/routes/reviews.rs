@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 #[post("/", data = "<req>")]
 pub async fn create_review(pool: &State<DbPool>, user: AuthenticatedUser, req: Json<CreateReviewRequest>) -> Result<Json<Review>, Status> {
+    user.require_permission("reviews.create")?;
+
     if req.rating < 1 || req.rating > 5 {
         return Err(Status::BadRequest);
     }
@@ -23,7 +25,7 @@ pub async fn create_review(pool: &State<DbPool>, user: AuthenticatedUser, req: J
     .bind(&req.order_id)
     .fetch_optional(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("create_review: select order query failed: {}", e); Status::InternalServerError })?;
 
     match order_check {
         Some((uid, status)) => {
@@ -50,7 +52,7 @@ pub async fn create_review(pool: &State<DbPool>, user: AuthenticatedUser, req: J
     )
     .bind(&id).bind(&req.order_id).bind(&req.line_item_id).bind(&user.user_id)
     .bind(req.rating).bind(&req.title).bind(&req.body)
-    .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .execute(pool.inner()).await.map_err(|e| { log::error!("create_review: insert review failed: {}", e); Status::InternalServerError })?;
 
     Ok(Json(Review {
         id, order_id: req.order_id.clone(), line_item_id: req.line_item_id.clone(),
@@ -70,7 +72,7 @@ pub async fn create_followup(pool: &State<DbPool>, user: AuthenticatedUser, req:
         "SELECT id, order_id, user_id, is_followup, created_at FROM reviews WHERE id = ?"
     )
     .bind(&req.parent_review_id)
-    .fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .fetch_optional(pool.inner()).await.map_err(|e| { log::error!("create_followup: select parent review failed: {}", e); Status::InternalServerError })?;
 
     match parent {
         Some((pid, order_id, parent_uid, is_fu, created_at)) => {
@@ -100,7 +102,7 @@ pub async fn create_followup(pool: &State<DbPool>, user: AuthenticatedUser, req:
             )
             .bind(&id).bind(&order_id).bind(&user.user_id)
             .bind(req.rating).bind(&req.title).bind(&req.body).bind(&pid)
-            .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .execute(pool.inner()).await.map_err(|e| { log::error!("create_followup: insert followup review failed: {}", e); Status::InternalServerError })?;
 
             Ok(Json(Review {
                 id, order_id, line_item_id: None, user_id: user.user_id,
@@ -127,7 +129,7 @@ pub async fn list_reviews(pool: &State<DbPool>, user: AuthenticatedUser) -> Resu
         )
         .bind(&user.user_id)
         .fetch_all(pool.inner()).await
-    }.map_err(|_| Status::InternalServerError)?;
+    }.map_err(|e| { log::error!("list_reviews: select reviews query failed: {}", e); Status::InternalServerError })?;
 
     let reviews: Vec<Review> = rows.into_iter().map(|(id, oid, lid, uid, rating, title, body, fu, prid, ca, ua)| {
         Review { id, order_id: oid, line_item_id: lid, user_id: uid, rating, title, body, is_followup: fu, parent_review_id: prid, created_at: ca, updated_at: ua }
@@ -142,7 +144,7 @@ pub async fn get_review(pool: &State<DbPool>, user: AuthenticatedUser, review_id
     let row = sqlx::query_as::<_, (String, String, Option<String>, String, i32, String, String, bool, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, line_item_id, user_id, rating, title, body, is_followup, parent_review_id, created_at, updated_at FROM reviews WHERE id = ?"
     )
-    .bind(&review_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .bind(&review_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("get_review: select review query failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some((id, oid, lid, uid, rating, title, body, fu, prid, ca, ua)) => {
@@ -152,7 +154,7 @@ pub async fn get_review(pool: &State<DbPool>, user: AuthenticatedUser, review_id
             if !is_review_owner && !is_privileged {
                 // Check if requester owns the order
                 let order_owner = sqlx::query_scalar::<_, String>("SELECT user_id FROM orders WHERE id = ?")
-                    .bind(&oid).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&oid).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("get_review: select order owner failed: {}", e); Status::InternalServerError })?;
                 if order_owner.as_deref() != Some(&user.user_id) {
                     return Err(Status::Forbidden);
                 }
@@ -167,7 +169,7 @@ pub async fn get_review(pool: &State<DbPool>, user: AuthenticatedUser, review_id
 #[post("/<review_id>/images", data = "<req>")]
 pub async fn add_review_image(pool: &State<DbPool>, user: AuthenticatedUser, review_id: String, req: Json<AddReviewImageRequest>) -> Result<Status, Status> {
     let owner = sqlx::query_scalar::<_, String>("SELECT user_id FROM reviews WHERE id = ?")
-        .bind(&review_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&review_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("add_review_image: select review owner failed: {}", e); Status::InternalServerError })?;
 
     match owner {
         Some(uid) if uid == user.user_id => {}
@@ -183,7 +185,7 @@ pub async fn add_review_image(pool: &State<DbPool>, user: AuthenticatedUser, rev
     }
 
     let file_data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.file_data)
-        .map_err(|_| Status::BadRequest)?;
+        .map_err(|e| { log::warn!("add_review_image: base64 decode failed: {}", e); Status::BadRequest })?;
 
     if file_data.len() as u64 > models::MAX_REVIEW_IMAGE_SIZE {
         return Err(Status::PayloadTooLarge);
@@ -215,7 +217,7 @@ pub async fn add_review_image(pool: &State<DbPool>, user: AuthenticatedUser, rev
     )
     .bind(&id).bind(&review_id).bind(&req.file_name).bind(&file_path)
     .bind(file_data.len() as i64).bind(&ext).bind(&file_hash).bind(&file_data)
-    .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .execute(pool.inner()).await.map_err(|e| { log::error!("add_review_image: insert review_images failed: {}", e); Status::InternalServerError })?;
 
     Ok(Status::Created)
 }
@@ -225,7 +227,7 @@ pub async fn my_reviews(pool: &State<DbPool>, user: AuthenticatedUser) -> Result
     let rows = sqlx::query_as::<_, (String, String, Option<String>, String, i32, String, String, bool, Option<String>, Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>)>(
         "SELECT id, order_id, line_item_id, user_id, rating, title, body, is_followup, parent_review_id, created_at, updated_at FROM reviews WHERE user_id = ? ORDER BY created_at DESC"
     )
-    .bind(&user.user_id).fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .bind(&user.user_id).fetch_all(pool.inner()).await.map_err(|e| { log::error!("my_reviews: select reviews query failed: {}", e); Status::InternalServerError })?;
 
     let reviews: Vec<Review> = rows.into_iter().map(|(id, oid, lid, uid, rating, title, body, fu, prid, ca, ua)| {
         Review { id, order_id: oid, line_item_id: lid, user_id: uid, rating, title, body, is_followup: fu, parent_review_id: prid, created_at: ca, updated_at: ua }

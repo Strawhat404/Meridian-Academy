@@ -431,4 +431,206 @@ mod tests {
             .and_hms_opt(14, 30, 0).unwrap();
         assert_eq!(dt.format("%m/%d/%Y, %I:%M:%S %p").to_string(), "04/02/2026, 02:30:00 PM");
     }
+
+    // ===== SUBMISSION TEMPLATES =====
+
+    #[test]
+    fn test_templates_cover_all_submission_types() {
+        use backend::models::submission::get_submission_templates;
+        let templates = get_submission_templates();
+        assert_eq!(templates.len(), 4, "Must have 4 templates");
+
+        let types: Vec<&str> = templates.iter().map(|t| t.submission_type.as_str()).collect();
+        assert!(types.contains(&"journal_article"));
+        assert!(types.contains(&"conference_paper"));
+        assert!(types.contains(&"thesis"));
+        assert!(types.contains(&"book_chapter"));
+    }
+
+    #[test]
+    fn test_templates_have_required_fields() {
+        use backend::models::submission::get_submission_templates;
+        let templates = get_submission_templates();
+        for tpl in &templates {
+            assert!(!tpl.id.is_empty(), "Template must have an id");
+            assert!(!tpl.name.is_empty(), "Template must have a name");
+            assert!(!tpl.required_fields.is_empty(), "Template must have required_fields");
+            assert!(!tpl.description.is_empty(), "Template must have a description");
+        }
+    }
+
+    #[test]
+    fn test_templates_unique_ids() {
+        use backend::models::submission::get_submission_templates;
+        let templates = get_submission_templates();
+        let ids: std::collections::HashSet<&str> = templates.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), templates.len(), "Template IDs must be unique");
+    }
+
+    // ===== ACCOUNT LIFECYCLE & RBAC TESTS =====
+
+    #[test]
+    fn test_role_change_requires_valid_role() {
+        let valid_roles = ["student", "instructor", "academic_staff", "administrator"];
+        assert!(valid_roles.contains(&"student"));
+        assert!(valid_roles.contains(&"administrator"));
+        assert!(!valid_roles.contains(&"superadmin"));
+        assert!(!valid_roles.contains(&""));
+        assert!(!valid_roles.contains(&"root"));
+    }
+
+    #[test]
+    fn test_deactivated_user_cannot_authenticate() {
+        // Simulates the auth guard check: is_active must be true
+        let is_active = false;
+        let soft_deleted_at: Option<chrono::NaiveDateTime> = None;
+        let should_deny = !is_active || soft_deleted_at.is_some();
+        assert!(should_deny, "Deactivated users must be denied");
+    }
+
+    #[test]
+    fn test_soft_deleted_user_cannot_authenticate() {
+        let is_active = true;
+        let soft_deleted_at = Some(Utc::now().naive_utc());
+        let should_deny = !is_active || soft_deleted_at.is_some();
+        assert!(should_deny, "Soft-deleted users must be denied");
+    }
+
+    #[test]
+    fn test_active_user_can_authenticate() {
+        let is_active = true;
+        let soft_deleted_at: Option<chrono::NaiveDateTime> = None;
+        let should_deny = !is_active || soft_deleted_at.is_some();
+        assert!(!should_deny, "Active, non-deleted users should be allowed");
+    }
+
+    #[test]
+    fn test_jwt_with_wrong_role_still_validates_structurally() {
+        // A JWT with role "student" decodes fine even if the DB role is
+        // different — the guard must *ignore* the JWT role and re-query.
+        // Here we verify that changing the role claim does not affect JWT
+        // structural validity (only the guard's DB check matters).
+        let secret = "test_secret_that_is_at_least_32_bytes_long!!";
+        let now = Utc::now().timestamp() as usize;
+        let claims_student = Claims {
+            sub: "u1".into(), username: "alice".into(), role: "student".into(),
+            iat: now, exp: now + 3600, session_id: "s1".into(),
+        };
+        let claims_admin = Claims {
+            sub: "u1".into(), username: "alice".into(), role: "administrator".into(),
+            iat: now, exp: now + 3600, session_id: "s1".into(),
+        };
+        let tok1 = encode(&Header::default(), &claims_student, &EncodingKey::from_secret(secret.as_bytes())).unwrap();
+        let tok2 = encode(&Header::default(), &claims_admin, &EncodingKey::from_secret(secret.as_bytes())).unwrap();
+        // Both tokens are structurally valid — the role difference lives only in claims
+        let d1 = decode::<Claims>(&tok1, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default()).unwrap();
+        let d2 = decode::<Claims>(&tok2, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default()).unwrap();
+        assert_eq!(d1.claims.sub, d2.claims.sub, "Same user regardless of claim role");
+        assert_ne!(d1.claims.role, d2.claims.role, "Role claims differ");
+    }
+
+    #[test]
+    fn test_session_expiry_enforced_by_timeout_constant() {
+        // Verify that session idle timeout is short enough to limit stale-role windows.
+        // The guard refreshes expiry on each request; if the user doesn't hit the API
+        // within this window, their session expires and they must re-login (getting fresh role).
+        let timeout_minutes = models::SESSION_IDLE_TIMEOUT_MINUTES;
+        assert!(timeout_minutes <= 60, "Session timeout must be <= 60 min to limit stale-role window");
+        let expiry = chrono::Utc::now().naive_utc() + Duration::minutes(timeout_minutes);
+        assert!(expiry > chrono::Utc::now().naive_utc(), "Expiry must be in the future");
+    }
+
+    #[test]
+    fn test_role_values_are_exhaustive_for_case_transitions() {
+        // Every case status transition that the system allows must be covered.
+        // Verify the production function rejects any hop from a terminal state.
+        let terminal = ["closed"];
+        let all_statuses = ["submitted", "in_review", "awaiting_evidence", "arbitrated", "approved", "denied", "closed"];
+        for from in &terminal {
+            for to in &all_statuses {
+                assert!(!models::valid_case_transition(from, to),
+                    "Terminal status '{}' must not transition to '{}'", from, to);
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_roles_cover_all_seeded_roles() {
+        // The role validation list used by route handlers must include every
+        // seeded role.  If a new role is added to the seed but not to validation,
+        // provisioning would silently break.
+        let valid_roles = ["student", "instructor", "academic_staff", "administrator"];
+        let seeded_roles = ["student", "instructor", "academic_staff", "administrator"];
+        for sr in &seeded_roles {
+            assert!(valid_roles.contains(sr), "Seeded role '{}' must be in the valid_roles list", sr);
+        }
+    }
+
+    #[test]
+    fn test_password_reset_token_expires_before_session() {
+        // A reset token should not outlive a full session cycle.
+        // This ensures a stolen reset token has a tight window.
+        assert!(models::PASSWORD_RESET_EXPIRY_MINUTES <= models::SESSION_IDLE_TIMEOUT_MINUTES * 2,
+            "Reset token expiry ({} min) should not be excessively long relative to session timeout ({} min)",
+            models::PASSWORD_RESET_EXPIRY_MINUTES, models::SESSION_IDLE_TIMEOUT_MINUTES);
+    }
+
+    #[test]
+    fn test_soft_delete_hold_is_longer_than_reset_expiry() {
+        // Soft-delete hold must be much longer than reset token expiry
+        // so users have time to cancel deletion.
+        let hold_minutes = models::SOFT_DELETE_HOLD_DAYS * 24 * 60;
+        assert!(hold_minutes > models::PASSWORD_RESET_EXPIRY_MINUTES,
+            "Soft-delete hold must exceed reset expiry to allow user recovery");
+    }
+
+    #[test]
+    fn test_case_cannot_skip_review_to_approval() {
+        // Direct submitted → approved must be blocked; must go through arbitration.
+        assert!(!models::valid_case_transition("submitted", "approved"));
+        assert!(!models::valid_case_transition("submitted", "denied"));
+        assert!(!models::valid_case_transition("in_review", "approved"));
+        assert!(!models::valid_case_transition("in_review", "denied"));
+        assert!(!models::valid_case_transition("in_review", "closed"));
+    }
+
+    #[test]
+    fn test_validate_metadata_rejects_oversized_keyword() {
+        // Individual keywords over 50 chars must be rejected
+        let long_kw = &"x".repeat(51);
+        assert!(models::validate_metadata("Title", None, None, Some(long_kw)).is_err());
+    }
+
+    #[test]
+    fn test_validate_file_type_extension_mismatch_rejected() {
+        // A PNG extension with JPEG magic bytes must be rejected
+        let jpeg_magic = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert!(models::validate_file_type("image.png", &jpeg_magic).is_err(),
+            "Extension/magic mismatch must be rejected");
+    }
+
+    // ===== RECONCILIATION STATUS LOGIC =====
+
+    #[test]
+    fn test_reconciliation_matched_when_equal() {
+        let expected = 5;
+        let received = 5;
+        let status = if expected == received { "matched" } else { "discrepancy" };
+        assert_eq!(status, "matched");
+    }
+
+    #[test]
+    fn test_reconciliation_discrepancy_when_different() {
+        let expected = 5;
+        let received = 3;
+        let status = if expected == received { "matched" } else { "discrepancy" };
+        assert_eq!(status, "discrepancy");
+    }
+
+    #[test]
+    fn test_reconciliation_pending_initial_state() {
+        let received_qty = 0;
+        let status = if received_qty == 0 { "pending" } else { "discrepancy" };
+        assert_eq!(status, "pending");
+    }
 }

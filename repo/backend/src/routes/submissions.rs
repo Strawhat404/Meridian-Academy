@@ -49,64 +49,109 @@ fn embed_watermark(file_bytes: &[u8], file_type: &str, watermark_text: &str) -> 
     }
 }
 
-/// PDF: Append a watermark page with the text rendered as a content stream.
+/// PDF: Add a watermark page using the `lopdf` library for correct PDF
+/// object allocation, page-tree management, xref generation, and
+/// content-stream construction.  No hand-rolled parsing or heuristic
+/// byte-offset computation.
 fn embed_watermark_pdf(pdf_bytes: &[u8], watermark: &str) -> Vec<u8> {
-    // Strategy: append new objects after %%EOF, adding a visible text page.
-    // This is a standards-compliant incremental update that any PDF reader renders.
-    let mut output = pdf_bytes.to_vec();
+    use lopdf::{dictionary, content, Document, Object, Stream, StringFormat};
 
-    // Find the highest object number (rough parse)
-    let pdf_str = String::from_utf8_lossy(pdf_bytes);
-    let mut max_obj: u32 = 10;
-    for line in pdf_str.lines() {
-        if let Some(pos) = line.find(" 0 obj") {
-            if let Ok(n) = line[..pos].trim().parse::<u32>() {
-                if n > max_obj { max_obj = n; }
+    let mut doc = match Document::load_mem(pdf_bytes) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("lopdf failed to parse PDF for watermarking: {} — returning original", e);
+            return pdf_bytes.to_vec();
+        }
+    };
+
+    // --- Build the watermark content stream ---
+    let safe_wm = watermark.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
+    let lines: Vec<&str> = safe_wm.split('|').map(|s| s.trim()).collect();
+    let mut ops = Vec::new();
+    ops.push(content::Operation::new("BT", vec![]));
+    ops.push(content::Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Real(10.0)]));
+    ops.push(content::Operation::new("Td", vec![Object::Real(50.0), Object::Real(750.0)]));
+    ops.push(content::Operation::new("TL", vec![Object::Real(14.0)]));
+    for line in &lines {
+        ops.push(content::Operation::new("Tj", vec![Object::String(line.as_bytes().to_vec(), StringFormat::Literal)]));
+        ops.push(content::Operation::new("T*", vec![]));
+    }
+    ops.push(content::Operation::new("Tj", vec![Object::String(b"---".to_vec(), StringFormat::Literal)]));
+    ops.push(content::Operation::new("T*", vec![]));
+    ops.push(content::Operation::new("Tj", vec![Object::String(b"WATERMARKED DOCUMENT - Meridian Academic Portal".to_vec(), StringFormat::Literal)]));
+    ops.push(content::Operation::new("ET", vec![]));
+
+    let content_data = content::Content { operations: ops };
+    let content_bytes = content_data.encode().unwrap_or_default();
+
+    // --- Create the content-stream object ---
+    let content_stream = Stream::new(dictionary! {}, content_bytes);
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    // --- Create a Type1 /Helvetica font object ---
+    let font_id = doc.add_object(dictionary! {
+        "Type" => Object::Name(b"Font".to_vec()),
+        "Subtype" => Object::Name(b"Type1".to_vec()),
+        "BaseFont" => Object::Name(b"Helvetica".to_vec()),
+    });
+
+    // --- Build a Resources dictionary referencing the font ---
+    let resources = dictionary! {
+        "Font" => dictionary! {
+            "F1" => Object::Reference(font_id),
+        },
+    };
+
+    // --- Find the root Pages object so we can add a kid ---
+    let pages_id = doc.get_pages().values().next()
+        .and_then(|first_page_id| {
+            doc.get_object(*first_page_id).ok()
+                .and_then(|obj| obj.as_dict().ok())
+                .and_then(|d| d.get(b"Parent").ok())
+                .and_then(|p| p.as_reference().ok())
+        })
+        .or_else(|| {
+            // Fallback: walk catalog → /Pages
+            doc.catalog().ok()
+                .and_then(|cat| cat.get(b"Pages").ok())
+                .and_then(|p| p.as_reference().ok())
+        })
+        .unwrap_or((1, 0));
+
+    // --- Create the new watermark Page ---
+    let page_dict = dictionary! {
+        "Type" => Object::Name(b"Page".to_vec()),
+        "Parent" => Object::Reference(pages_id),
+        "MediaBox" => Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792)]),
+        "Contents" => Object::Reference(content_id),
+        "Resources" => resources,
+    };
+    let page_id = doc.add_object(page_dict);
+
+    // --- Append the new page to the Pages /Kids array and bump /Count ---
+    if let Ok(pages_obj) = doc.get_object_mut(pages_id) {
+        if let Ok(pages_dict) = pages_obj.as_dict_mut() {
+            if let Ok(kids) = pages_dict.get_mut(b"Kids") {
+                if let Ok(arr) = kids.as_array_mut() {
+                    arr.push(Object::Reference(page_id));
+                }
+            }
+            if let Ok(count) = pages_dict.get(b"Count") {
+                if let Ok(n) = count.as_i64() {
+                    pages_dict.set("Count", Object::Integer(n + 1));
+                }
             }
         }
     }
 
-    let page_obj = max_obj + 1;
-    let content_obj = max_obj + 2;
-    let font_obj = max_obj + 3;
-
-    // Escape watermark for PDF text
-    let safe_wm = watermark.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
-    // Split into lines for multi-line rendering
-    let lines: Vec<&str> = safe_wm.split('|').map(|s| s.trim()).collect();
-    let mut text_ops = String::new();
-    text_ops.push_str("BT\n/F1 10 Tf\n50 750 Td\n14 TL\n");
-    for line in &lines {
-        text_ops.push_str(&format!("({}) Tj T*\n", line));
+    // --- Serialize the modified document ---
+    let mut out_buf = Vec::new();
+    if doc.save_to(&mut out_buf).is_ok() {
+        out_buf
+    } else {
+        log::warn!("lopdf save failed — returning original PDF");
+        pdf_bytes.to_vec()
     }
-    text_ops.push_str("(---) Tj T*\n(WATERMARKED DOCUMENT - Meridian Academic Portal) Tj\nET\n");
-
-    let content_stream = text_ops.as_bytes();
-    let content_len = content_stream.len();
-
-    // Append incremental objects
-    let xref_offset = output.len();
-    let appendix = format!(
-        "\n{page_obj} 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 612 792] /Contents {content_obj} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>\nendobj\n\
-         {content_obj} 0 obj\n<< /Length {content_len} >>\nstream\n{text_ops}endstream\nendobj\n\
-         {font_obj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
-         xref\n0 1\n0000000000 65535 f \n{page_obj} 3\n{xref_pos:010} 00000 n \n{content_pos:010} 00000 n \n{font_pos:010} 00000 n \n\
-         trailer\n<< /Size {size} /Prev {prev} >>\nstartxref\n{startxref}\n%%EOF\n",
-        page_obj = page_obj,
-        content_obj = content_obj,
-        font_obj = font_obj,
-        content_len = content_len,
-        text_ops = String::from_utf8_lossy(content_stream),
-        xref_pos = xref_offset + 1,
-        content_pos = xref_offset + 200, // approximate
-        font_pos = xref_offset + 400,    // approximate
-        size = font_obj + 1,
-        prev = xref_offset,
-        startxref = xref_offset + 500,
-    );
-
-    output.extend_from_slice(appendix.as_bytes());
-    output
 }
 
 /// Render a visible text watermark onto an image (PNG or JPG).
@@ -323,9 +368,16 @@ async fn load_sensitive_words(pool: &DbPool) -> Vec<content::SensitiveWord> {
     .collect()
 }
 
+/// Returns the list of guided submission templates so the frontend can
+/// present type-specific form fields to the author.
+#[get("/templates")]
+pub async fn list_templates() -> Json<Vec<crate::models::submission::SubmissionTemplate>> {
+    Json(crate::models::submission::get_submission_templates())
+}
+
 #[post("/", data = "<req>")]
 pub async fn create_submission(pool: &State<DbPool>, user: AuthenticatedUser, req: Json<CreateSubmissionRequest>) -> Result<Json<Submission>, Status> {
-    user.require_permission("submissions.create").map_err(|_| Status::Forbidden)?;
+    user.require_permission("submissions.create")?;
 
     let valid_types = ["journal_article", "conference_paper", "thesis", "book_chapter"];
     if !valid_types.contains(&req.submission_type.as_str()) {
@@ -334,7 +386,7 @@ pub async fn create_submission(pool: &State<DbPool>, user: AuthenticatedUser, re
 
     // Validate metadata lengths
     models::validate_metadata(&req.title, req.summary.as_deref(), req.tags.as_deref(), req.keywords.as_deref())
-        .map_err(|e| { log::warn!("Metadata validation failed: {}", e); Status::UnprocessableEntity })?;
+        .map_err(|e| { log::warn!("create_submission: metadata validation failed: {}", e); Status::UnprocessableEntity })?;
 
     // Check sensitive words in title and summary
     let words = load_sensitive_words(pool.inner()).await;
@@ -371,7 +423,7 @@ pub async fn create_submission(pool: &State<DbPool>, user: AuthenticatedUser, re
     .bind(&req.tags).bind(&req.keywords)
     .execute(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("create_submission: insert submission failed: {}", e); Status::InternalServerError })?;
 
     Ok(Json(Submission {
         id, author_id: user.user_id, title: processed_title, summary: processed_summary,
@@ -412,7 +464,7 @@ pub async fn list_submissions(pool: &State<DbPool>, user: AuthenticatedUser) -> 
         .bind(&user.user_id)
         .fetch_all(pool.inner())
         .await
-    }.map_err(|_| Status::InternalServerError)?;
+    }.map_err(|e| { log::error!("list_submissions: select submissions query failed: {}", e); Status::InternalServerError })?;
 
     let subs: Vec<Submission> = rows.into_iter().map(|(id, author_id, title, summary, submission_type, status, deadline, cv, mv, mt, md, slug, tags, keywords, created_at, updated_at)| {
         Submission { id, author_id, title, summary, submission_type, status, deadline, current_version: cv, max_versions: mv, meta_title: mt, meta_description: md, slug, tags, keywords, created_at, updated_at }
@@ -429,7 +481,7 @@ pub async fn get_submission(pool: &State<DbPool>, user: AuthenticatedUser, submi
     .bind(&submission_id)
     .fetch_optional(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("get_submission: select submission query failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some((id, author_id, title, summary, submission_type, status, deadline, cv, mv, mt, md, slug, tags, keywords, created_at, updated_at)) => {
@@ -449,7 +501,7 @@ pub async fn get_submission(pool: &State<DbPool>, user: AuthenticatedUser, submi
 #[put("/<submission_id>", data = "<req>")]
 pub async fn update_submission(pool: &State<DbPool>, user: AuthenticatedUser, submission_id: String, req: Json<UpdateSubmissionRequest>) -> Result<Json<Submission>, Status> {
     let owner = sqlx::query_scalar::<_, String>("SELECT author_id FROM submissions WHERE id = ?")
-        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("update_submission: select author_id failed: {}", e); Status::InternalServerError })?;
 
     match owner {
         Some(author_id) => {
@@ -469,24 +521,24 @@ pub async fn update_submission(pool: &State<DbPool>, user: AuthenticatedUser, su
         let (mt, md, sl) = models::generate_seo(title, req.summary.as_deref());
         sqlx::query("UPDATE submissions SET title = ?, meta_title = ?, meta_description = ?, slug = ?, updated_at = NOW() WHERE id = ?")
             .bind(title).bind(&mt).bind(&md).bind(&sl).bind(&submission_id)
-            .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .execute(pool.inner()).await.map_err(|e| { log::error!("update_submission: update title failed: {}", e); Status::InternalServerError })?;
     }
     if let Some(ref summary) = req.summary {
         if summary.len() > 500 { return Err(Status::UnprocessableEntity); }
         sqlx::query("UPDATE submissions SET summary = ?, updated_at = NOW() WHERE id = ?")
-            .bind(summary).bind(&submission_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(summary).bind(&submission_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_submission: update summary failed: {}", e); Status::InternalServerError })?;
     }
     if let Some(ref status) = req.status {
         sqlx::query("UPDATE submissions SET status = ?, updated_at = NOW() WHERE id = ?")
-            .bind(status).bind(&submission_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(status).bind(&submission_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_submission: update status failed: {}", e); Status::InternalServerError })?;
     }
     if let Some(ref tags) = req.tags {
         sqlx::query("UPDATE submissions SET tags = ?, updated_at = NOW() WHERE id = ?")
-            .bind(tags).bind(&submission_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(tags).bind(&submission_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_submission: update tags failed: {}", e); Status::InternalServerError })?;
     }
     if let Some(ref keywords) = req.keywords {
         sqlx::query("UPDATE submissions SET keywords = ?, updated_at = NOW() WHERE id = ?")
-            .bind(keywords).bind(&submission_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(keywords).bind(&submission_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_submission: update keywords failed: {}", e); Status::InternalServerError })?;
     }
 
     get_submission(pool, user, submission_id).await
@@ -501,7 +553,7 @@ pub async fn submit_version(pool: &State<DbPool>, user: AuthenticatedUser, submi
     .bind(&submission_id)
     .fetch_optional(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("submit_version: select submission query failed: {}", e); Status::InternalServerError })?;
 
     let (author_id, current_version, max_versions, deadline, _status) = match sub {
         Some(s) => s,
@@ -526,7 +578,7 @@ pub async fn submit_version(pool: &State<DbPool>, user: AuthenticatedUser, submi
 
     // Decode file
     let file_data = base64::engine::general_purpose::STANDARD.decode(&req.file_data)
-        .map_err(|_| Status::BadRequest)?;
+        .map_err(|e| { log::warn!("submit_version: base64 decode failed: {}", e); Status::BadRequest })?;
 
     // Check file size
     if file_data.len() as u64 > models::MAX_FILE_SIZE {
@@ -536,7 +588,7 @@ pub async fn submit_version(pool: &State<DbPool>, user: AuthenticatedUser, submi
     // Validate file type by extension and magic bytes
     let magic = if file_data.len() >= 8 { &file_data[..8] } else { &file_data };
     let file_type = models::validate_file_type(&req.file_name, magic)
-        .map_err(|_| Status::UnsupportedMediaType)?;
+        .map_err(|e| { log::warn!("submit_version: file type validation failed for '{}': {}", req.file_name, e); Status::UnsupportedMediaType })?;
 
     // SHA-256 hash
     let mut hasher = Sha256::new();
@@ -557,12 +609,12 @@ pub async fn submit_version(pool: &State<DbPool>, user: AuthenticatedUser, submi
     .bind(&magic_hex).bind(&req.form_data).bind(&file_data)
     .execute(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("submit_version: insert version failed: {}", e); Status::InternalServerError })?;
 
     // Update submission version counter and status
     sqlx::query("UPDATE submissions SET current_version = ?, status = 'submitted', updated_at = NOW() WHERE id = ?")
         .bind(new_version).bind(&submission_id)
-        .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .execute(pool.inner()).await.map_err(|e| { log::error!("submit_version: update submission version counter failed: {}", e); Status::InternalServerError })?;
 
     // Log audit
     let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'version_submitted', 'submission', ?, ?, NOW())")
@@ -580,7 +632,7 @@ pub async fn submit_version(pool: &State<DbPool>, user: AuthenticatedUser, submi
 pub async fn list_versions(pool: &State<DbPool>, user: AuthenticatedUser, submission_id: String) -> Result<Json<Vec<SubmissionVersionResponse>>, Status> {
     // IDOR: verify caller owns this submission or is privileged
     let owner = sqlx::query_scalar::<_, String>("SELECT author_id FROM submissions WHERE id = ?")
-        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("list_versions: select author_id failed: {}", e); Status::InternalServerError })?;
     match owner {
         Some(aid) => {
             if aid != user.user_id && !user.is_privileged() {
@@ -595,7 +647,7 @@ pub async fn list_versions(pool: &State<DbPool>, user: AuthenticatedUser, submis
     .bind(&submission_id)
     .fetch_all(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("list_versions: select versions query failed: {}", e); Status::InternalServerError })?;
 
     let versions: Vec<SubmissionVersionResponse> = rows.into_iter().map(|(id, _sid, vn, fname, _fpath, fsize, ftype, fhash, _mb, _fd, submitted_at)| {
         let submitted_str = submitted_at.map(|dt| dt.format("%m/%d/%Y, %I:%M:%S %p").to_string());
@@ -609,7 +661,7 @@ pub async fn list_versions(pool: &State<DbPool>, user: AuthenticatedUser, submis
 pub async fn download_version(pool: &State<DbPool>, user: AuthenticatedUser, submission_id: String, version_number: i32) -> Result<FileDownload, Status> {
     // IDOR: verify caller owns this submission or is privileged
     let owner = sqlx::query_scalar::<_, String>("SELECT author_id FROM submissions WHERE id = ?")
-        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&submission_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("download_version: select author_id failed: {}", e); Status::InternalServerError })?;
     match owner {
         Some(aid) => {
             if aid != user.user_id && !user.is_privileged() {
@@ -626,7 +678,7 @@ pub async fn download_version(pool: &State<DbPool>, user: AuthenticatedUser, sub
     .bind(version_number)
     .fetch_optional(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("download_version: select version data failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some((file_name, file_size, original_hash, file_type, file_data_opt)) => {
@@ -700,7 +752,7 @@ pub async fn my_submissions(pool: &State<DbPool>, user: AuthenticatedUser) -> Re
     .bind(&user.user_id)
     .fetch_all(pool.inner())
     .await
-    .map_err(|_| Status::InternalServerError)?;
+    .map_err(|e| { log::error!("my_submissions: select submissions query failed: {}", e); Status::InternalServerError })?;
 
     let subs: Vec<Submission> = rows.into_iter().map(|(id, author_id, title, summary, submission_type, status, deadline, cv, mv, mt, md, slug, tags, keywords, created_at, updated_at)| {
         Submission { id, author_id, title, summary, submission_type, status, deadline, current_version: cv, max_versions: mv, meta_title: mt, meta_description: md, slug, tags, keywords, created_at, updated_at }
@@ -712,13 +764,13 @@ pub async fn my_submissions(pool: &State<DbPool>, user: AuthenticatedUser) -> Re
 /// Academic staff approves blocked content
 #[post("/<submission_id>/approve")]
 pub async fn approve_blocked(pool: &State<DbPool>, user: AuthenticatedUser, submission_id: String) -> Result<Status, Status> {
-    user.require_permission("submissions.approve_blocked").map_err(|_| Status::Forbidden)?;
+    user.require_permission("submissions.approve_blocked")?;
 
     sqlx::query("UPDATE submissions SET status = 'submitted', updated_at = NOW() WHERE id = ? AND status = 'blocked'")
         .bind(&submission_id)
         .execute(pool.inner())
         .await
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|e| { log::error!("approve_blocked: update submission status failed: {}", e); Status::InternalServerError })?;
 
     let _ = sqlx::query("INSERT INTO audit_log (id, user_id, action, target_type, target_id, details, created_at) VALUES (?, ?, 'blocked_content_approved', 'submission', ?, 'Blocked submission approved by staff', NOW())")
         .bind(Uuid::new_v4().to_string()).bind(&user.user_id).bind(&submission_id)

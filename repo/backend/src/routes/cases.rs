@@ -56,6 +56,8 @@ fn compute_sla(case: &AfterSalesCase) -> CaseWithSla {
 
 #[post("/", data = "<req>")]
 pub async fn create_case(pool: &State<DbPool>, user: AuthenticatedUser, req: Json<CreateCaseRequest>) -> Result<Json<CaseWithSla>, Status> {
+    user.require_permission("cases.create")?;
+
     let valid_types = ["return", "refund", "exchange"];
     if !valid_types.contains(&req.case_type.as_str()) {
         return Err(Status::BadRequest);
@@ -66,7 +68,7 @@ pub async fn create_case(pool: &State<DbPool>, user: AuthenticatedUser, req: Jso
         .bind(&req.order_id)
         .fetch_optional(pool.inner())
         .await
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|e| { log::error!("create_case: select order owner failed: {}", e); Status::InternalServerError })?;
 
     match order_owner {
         Some(owner_id) => {
@@ -89,7 +91,7 @@ pub async fn create_case(pool: &State<DbPool>, user: AuthenticatedUser, req: Jso
     .bind(&id).bind(&req.order_id).bind(&user.user_id).bind(&req.case_type)
     .bind(&req.subject).bind(&req.description).bind(&priority)
     .bind(&now).bind(&first_response_due).bind(&resolution_target)
-    .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .execute(pool.inner()).await.map_err(|e| { log::error!("create_case: insert case failed: {}", e); Status::InternalServerError })?;
 
     let case = AfterSalesCase {
         id, order_id: req.order_id.clone(), reporter_id: user.user_id,
@@ -116,7 +118,7 @@ pub async fn list_cases(pool: &State<DbPool>, user: AuthenticatedUser) -> Result
         )
         .bind(&user.user_id)
         .fetch_all(pool.inner()).await
-    }.map_err(|_| Status::InternalServerError)?;
+    }.map_err(|e| { log::error!("list_cases: select cases query failed: {}", e); Status::InternalServerError })?;
 
     let cases: Vec<CaseWithSla> = rows.into_iter().map(|r| {
         let case = row_to_case(r);
@@ -130,7 +132,7 @@ pub async fn list_cases(pool: &State<DbPool>, user: AuthenticatedUser) -> Result
 pub async fn get_case(pool: &State<DbPool>, user: AuthenticatedUser, case_id: String) -> Result<Json<CaseWithSla>, Status> {
     let query = format!("{} WHERE id = ?", CASE_SELECT);
     let row = sqlx::query_as::<_, CaseRow>(&query)
-        .bind(&case_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&case_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("get_case: select case query failed: {}", e); Status::InternalServerError })?;
 
     match row {
         Some(r) => {
@@ -147,7 +149,7 @@ pub async fn update_case_status(pool: &State<DbPool>, user: AuthenticatedUser, c
     user.require_privileged()?;
 
     let current = sqlx::query_scalar::<_, String>("SELECT status FROM after_sales_cases WHERE id = ?")
-        .bind(&case_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&case_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("update_case_status: select current status failed: {}", e); Status::InternalServerError })?;
 
     match current {
         Some(cur) => {
@@ -156,19 +158,19 @@ pub async fn update_case_status(pool: &State<DbPool>, user: AuthenticatedUser, c
             }
 
             sqlx::query("UPDATE after_sales_cases SET status = ?, updated_at = NOW() WHERE id = ?")
-                .bind(&req.status).bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                .bind(&req.status).bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_case_status: update status failed: {}", e); Status::InternalServerError })?;
 
             if cur == "submitted" && req.status == "in_review" {
                 sqlx::query("UPDATE after_sales_cases SET first_response_at = COALESCE(first_response_at, NOW()) WHERE id = ?")
-                    .bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_case_status: update first_response_at failed: {}", e); Status::InternalServerError })?;
             }
             if req.status == "approved" || req.status == "denied" {
                 sqlx::query("UPDATE after_sales_cases SET resolved_at = NOW() WHERE id = ?")
-                    .bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_case_status: update resolved_at failed: {}", e); Status::InternalServerError })?;
             }
             if req.status == "closed" {
                 sqlx::query("UPDATE after_sales_cases SET closed_at = NOW() WHERE id = ?")
-                    .bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+                    .bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("update_case_status: update closed_at failed: {}", e); Status::InternalServerError })?;
             }
 
             Ok(Status::Ok)
@@ -181,7 +183,7 @@ pub async fn update_case_status(pool: &State<DbPool>, user: AuthenticatedUser, c
 pub async fn assign_case(pool: &State<DbPool>, user: AuthenticatedUser, case_id: String, req: Json<AssignCaseRequest>) -> Result<Status, Status> {
     user.require_privileged()?;
     sqlx::query("UPDATE after_sales_cases SET assigned_to = ?, updated_at = NOW() WHERE id = ?")
-        .bind(&req.assigned_to).bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&req.assigned_to).bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("assign_case: update assigned_to failed: {}", e); Status::InternalServerError })?;
     Ok(Status::Ok)
 }
 
@@ -190,7 +192,7 @@ pub async fn add_comment(pool: &State<DbPool>, user: AuthenticatedUser, case_id:
     // IDOR: verify caller is the case reporter, the assigned staff, or privileged
     let case_info = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT reporter_id, assigned_to FROM after_sales_cases WHERE id = ?"
-    ).bind(&case_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    ).bind(&case_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("add_comment: select case info failed: {}", e); Status::InternalServerError })?;
 
     match case_info {
         Some((reporter_id, assigned_to)) => {
@@ -207,11 +209,11 @@ pub async fn add_comment(pool: &State<DbPool>, user: AuthenticatedUser, case_id:
 
     sqlx::query("INSERT INTO case_comments (id, case_id, author_id, content, created_at) VALUES (?, ?, ?, ?, NOW())")
         .bind(&id).bind(&case_id).bind(&user.user_id).bind(&req.content)
-        .execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .execute(pool.inner()).await.map_err(|e| { log::error!("add_comment: insert comment failed: {}", e); Status::InternalServerError })?;
 
     if user.is_privileged() {
         sqlx::query("UPDATE after_sales_cases SET first_response_at = COALESCE(first_response_at, NOW()) WHERE id = ?")
-            .bind(&case_id).execute(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+            .bind(&case_id).execute(pool.inner()).await.map_err(|e| { log::error!("add_comment: update first_response_at failed: {}", e); Status::InternalServerError })?;
     }
 
     Ok(Json(CaseComment { id, case_id, author_id: user.user_id, content: req.content.clone(), created_at: None }))
@@ -222,7 +224,7 @@ pub async fn get_comments(pool: &State<DbPool>, user: AuthenticatedUser, case_id
     // IDOR: verify caller is the reporter, the assigned handler, or privileged
     let case_info = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT reporter_id, assigned_to FROM after_sales_cases WHERE id = ?"
-    ).bind(&case_id).fetch_optional(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    ).bind(&case_id).fetch_optional(pool.inner()).await.map_err(|e| { log::error!("get_comments: select case info failed: {}", e); Status::InternalServerError })?;
     match case_info {
         Some((rid, assigned_to)) => {
             let is_reporter = rid == user.user_id;
@@ -236,7 +238,7 @@ pub async fn get_comments(pool: &State<DbPool>, user: AuthenticatedUser, case_id
     let rows = sqlx::query_as::<_, (String, String, String, String, Option<chrono::NaiveDateTime>)>(
         "SELECT id, case_id, author_id, content, created_at FROM case_comments WHERE case_id = ? ORDER BY created_at ASC"
     )
-    .bind(&case_id).fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+    .bind(&case_id).fetch_all(pool.inner()).await.map_err(|e| { log::error!("get_comments: select comments query failed: {}", e); Status::InternalServerError })?;
 
     let comments: Vec<CaseComment> = rows.into_iter().map(|(id, cid, aid, content, ca)| {
         CaseComment { id, case_id: cid, author_id: aid, content, created_at: ca }
@@ -249,7 +251,7 @@ pub async fn get_comments(pool: &State<DbPool>, user: AuthenticatedUser, case_id
 pub async fn my_cases(pool: &State<DbPool>, user: AuthenticatedUser) -> Result<Json<Vec<CaseWithSla>>, Status> {
     let query = format!("{} WHERE reporter_id = ? ORDER BY created_at DESC", CASE_SELECT);
     let rows = sqlx::query_as::<_, CaseRow>(&query)
-        .bind(&user.user_id).fetch_all(pool.inner()).await.map_err(|_| Status::InternalServerError)?;
+        .bind(&user.user_id).fetch_all(pool.inner()).await.map_err(|e| { log::error!("my_cases: select cases query failed: {}", e); Status::InternalServerError })?;
 
     let cases: Vec<CaseWithSla> = rows.into_iter().map(|r| {
         let case = row_to_case(r);

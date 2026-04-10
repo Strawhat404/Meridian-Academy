@@ -36,11 +36,61 @@ pub struct SubmissionVersion {
     pub submitted_at: Option<NaiveDateTime>,
 }
 
+/// Predefined submission templates that guide authors through type-specific fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmissionTemplate {
+    pub id: String,
+    pub name: String,
+    pub submission_type: String,
+    pub required_fields: Vec<String>,
+    pub optional_fields: Vec<String>,
+    pub description: String,
+}
+
+/// Returns the built-in set of guided submission templates.
+pub fn get_submission_templates() -> Vec<SubmissionTemplate> {
+    vec![
+        SubmissionTemplate {
+            id: "tpl-journal".to_string(),
+            name: "Journal Article".to_string(),
+            submission_type: "journal_article".to_string(),
+            required_fields: vec!["title".into(), "abstract".into(), "keywords".into(), "methodology".into()],
+            optional_fields: vec!["acknowledgments".into(), "funding_source".into()],
+            description: "Standard template for peer-reviewed journal article submissions.".to_string(),
+        },
+        SubmissionTemplate {
+            id: "tpl-conference".to_string(),
+            name: "Conference Paper".to_string(),
+            submission_type: "conference_paper".to_string(),
+            required_fields: vec!["title".into(), "abstract".into(), "keywords".into(), "conference_name".into()],
+            optional_fields: vec!["presentation_type".into(), "co_authors".into()],
+            description: "Template for conference paper submissions with session details.".to_string(),
+        },
+        SubmissionTemplate {
+            id: "tpl-thesis".to_string(),
+            name: "Thesis".to_string(),
+            submission_type: "thesis".to_string(),
+            required_fields: vec!["title".into(), "abstract".into(), "department".into(), "advisor".into(), "degree_type".into()],
+            optional_fields: vec!["committee_members".into(), "defense_date".into()],
+            description: "Template for thesis/dissertation submissions with committee details.".to_string(),
+        },
+        SubmissionTemplate {
+            id: "tpl-book-chapter".to_string(),
+            name: "Book Chapter".to_string(),
+            submission_type: "book_chapter".to_string(),
+            required_fields: vec!["title".into(), "abstract".into(), "book_title".into(), "editor".into()],
+            optional_fields: vec!["chapter_number".into(), "isbn".into()],
+            description: "Template for contributed book chapter submissions.".to_string(),
+        },
+    ]
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSubmissionRequest {
     pub title: String,
     pub summary: Option<String>,
     pub submission_type: String,
+    pub template_id: Option<String>,
     pub deadline: Option<String>,
     pub tags: Option<String>,
     pub keywords: Option<String>,

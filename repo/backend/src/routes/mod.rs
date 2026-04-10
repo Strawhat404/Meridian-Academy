@@ -47,6 +47,7 @@ pub fn user_routes() -> Vec<rocket::Route> {
 
 pub fn submission_routes() -> Vec<rocket::Route> {
     routes![
+        submissions::list_templates,
         submissions::create_submission,
         submissions::list_submissions,
         submissions::get_submission,

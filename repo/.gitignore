@@ -6,7 +6,7 @@ frontend/dist/
 
 # Environment secrets — only .env.example should be committed
 .env
-
+hashgen/
 # Runtime file uploads
 uploads/
 

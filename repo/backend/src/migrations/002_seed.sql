@@ -53,7 +53,6 @@ INSERT IGNORE INTO role_permissions (id, role_id, permission_id) VALUES
 ('rp-i5',  'role-instructor', 'perm-cases-create'),
 
 ('rp-as1', 'role-academic-staff', 'perm-users-list'),
-('rp-as2', 'role-academic-staff', 'perm-users-manage'),
 ('rp-as3', 'role-academic-staff', 'perm-submissions-list'),
 ('rp-as4', 'role-academic-staff', 'perm-submissions-review'),
 ('rp-as5', 'role-academic-staff', 'perm-submissions-approve-blocked'),

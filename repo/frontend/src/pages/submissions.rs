@@ -28,11 +28,22 @@ struct SubmissionVersion {
     submitted_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SubmissionTemplate {
+    id: String,
+    name: String,
+    submission_type: String,
+    required_fields: Vec<String>,
+    optional_fields: Vec<String>,
+    description: String,
+}
+
 #[derive(Serialize)]
 struct CreateSubmission {
     title: String,
     summary: Option<String>,
     submission_type: String,
+    template_id: Option<String>,
     tags: Option<String>,
     deadline: Option<String>,
 }
@@ -229,18 +240,26 @@ pub fn NewSubmissionPage() -> Element {
     let mut title = use_signal(String::new);
     let mut summary = use_signal(String::new);
     let mut submission_type = use_signal(|| "journal_article".to_string());
+    let mut selected_template = use_signal(|| Option::<SubmissionTemplate>::None);
     let mut tags = use_signal(String::new);
     let mut deadline = use_signal(String::new);
     let mut message = use_signal(|| Option::<String>::None);
     let nav = use_navigator();
 
+    // Fetch available templates
+    let templates = use_resource(|| async {
+        api::get::<Vec<SubmissionTemplate>>("/api/submissions/templates").await.unwrap_or_default()
+    });
+
     let onsubmit = move |_: FormEvent| {
         let nav = nav.clone();
         let dl = deadline.read().clone();
+        let tpl_id = selected_template.read().as_ref().map(|t| t.id.clone());
         let data = CreateSubmission {
             title: title.read().clone(),
             summary: { let s = summary.read().clone(); if s.is_empty() { None } else { Some(s) } },
             submission_type: submission_type.read().clone(),
+            template_id: tpl_id,
             tags: { let t = tags.read().clone(); if t.is_empty() { None } else { Some(t) } },
             deadline: if dl.is_empty() { None } else { Some(format!("{}:00", dl)) },
         };
@@ -259,6 +278,44 @@ pub fn NewSubmissionPage() -> Element {
                 div { class: "error-message", "{msg}" }
             }
             form { onsubmit,
+                // Template selection
+                div { class: "form-group",
+                    label { "Submission Template" }
+                    select {
+                        onchange: {
+                            let templates = templates.clone();
+                            move |e: FormEvent| {
+                                let val = e.value();
+                                if let Some(tpls) = templates.read().as_ref() {
+                                    if let Some(tpl) = tpls.iter().find(|t| t.id == val) {
+                                        submission_type.set(tpl.submission_type.clone());
+                                        selected_template.set(Some(tpl.clone()));
+                                    } else {
+                                        selected_template.set(None);
+                                    }
+                                }
+                            }
+                        },
+                        option { value: "", "-- Select a template --" }
+                        if let Some(tpls) = templates.read().as_ref() {
+                            for tpl in tpls.iter() {
+                                option { value: "{tpl.id}", "{tpl.name}" }
+                            }
+                        }
+                    }
+                }
+
+                // Show template guidance if selected
+                if let Some(ref tpl) = *selected_template.read() {
+                    div { class: "profile-card",
+                        p { "{tpl.description}" }
+                        p { strong { "Required fields: " } "{tpl.required_fields.join(\", \")}" }
+                        if !tpl.optional_fields.is_empty() {
+                            p { strong { "Optional fields: " } "{tpl.optional_fields.join(\", \")}" }
+                        }
+                    }
+                }
+
                 div { class: "form-group",
                     label { "Title (max 120 chars)" }
                     input {

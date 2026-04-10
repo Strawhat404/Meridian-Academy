@@ -33,6 +33,8 @@ enum Route {
     Cases {},
     #[route("/cases/new")]
     NewCase {},
+    #[route("/admin/cases/:case_id")]
+    AdminCaseDetail { case_id: String },
     #[route("/admin")]
     Admin {},
     #[route("/admin/users")]
@@ -151,6 +153,7 @@ fn Login() -> Element {
 
 #[component]
 fn AdminProvision() -> Element {
+    if require_admin().is_none() { return rsx! {} }
     let mut username = use_signal(String::new);
     let mut email = use_signal(String::new);
     let mut password = use_signal(String::new);
@@ -293,7 +296,7 @@ fn Dashboard() -> Element {
                             p { "Manage after-sales support cases." }
                             Link { to: Route::Cases {}, class: "btn", "View Cases" }
                         }
-                        if u.role == "administrator" {
+                        if u.role == "administrator" || u.role == "academic_staff" {
                             div { class: "dashboard-card",
                                 h3 { "Administration" }
                                 p { "System administration and user management." }
@@ -310,8 +313,44 @@ fn Dashboard() -> Element {
     }
 }
 
+/// Guard: redirects to /login if user is not authenticated.
+fn require_auth() -> Option<services::auth::UserInfo> {
+    let user = services::auth::get_current_user();
+    if user.is_none() {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_href("/login");
+        }
+    }
+    user
+}
+
+/// Guard: redirects to /login if user is not an administrator.
+fn require_admin() -> Option<services::auth::UserInfo> {
+    let user = require_auth()?;
+    if user.role != "administrator" {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_href("/dashboard");
+        }
+        return None;
+    }
+    Some(user)
+}
+
+/// Guard: redirects to /dashboard if user is not staff or administrator.
+fn require_staff() -> Option<services::auth::UserInfo> {
+    let user = require_auth()?;
+    if user.role != "administrator" && user.role != "academic_staff" {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_href("/dashboard");
+        }
+        return None;
+    }
+    Some(user)
+}
+
 #[component]
 fn Submissions() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::submissions::SubmissionsPage {}
@@ -321,6 +360,7 @@ fn Submissions() -> Element {
 
 #[component]
 fn NewSubmission() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::submissions::NewSubmissionPage {}
@@ -330,6 +370,7 @@ fn NewSubmission() -> Element {
 
 #[component]
 fn Orders() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::orders::OrdersPage {}
@@ -339,6 +380,7 @@ fn Orders() -> Element {
 
 #[component]
 fn NewOrder() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::orders::NewOrderPage {}
@@ -348,6 +390,7 @@ fn NewOrder() -> Element {
 
 #[component]
 fn Reviews() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::reviews::ReviewsPage {}
@@ -357,6 +400,7 @@ fn Reviews() -> Element {
 
 #[component]
 fn Cases() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::cases::CasesPage {}
@@ -366,6 +410,7 @@ fn Cases() -> Element {
 
 #[component]
 fn NewCase() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::cases::NewCasePage {}
@@ -375,6 +420,7 @@ fn NewCase() -> Element {
 
 #[component]
 fn Admin() -> Element {
+    if require_staff().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::admin::AdminPage {}
@@ -384,6 +430,7 @@ fn Admin() -> Element {
 
 #[component]
 fn AdminUsers() -> Element {
+    if require_admin().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::admin::AdminUsersPage {}
@@ -392,7 +439,18 @@ fn AdminUsers() -> Element {
 }
 
 #[component]
+fn AdminCaseDetail(case_id: String) -> Element {
+    if require_staff().is_none() { return rsx! {} }
+    rsx! {
+        components::layout::Layout {
+            pages::cases::AdminCaseDetailPage { case_id }
+        }
+    }
+}
+
+#[component]
 fn Profile() -> Element {
+    if require_auth().is_none() { return rsx! {} }
     rsx! {
         components::layout::Layout {
             pages::profile::ProfilePage {}

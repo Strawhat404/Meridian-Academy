@@ -28,13 +28,26 @@ async fn rocket() -> _ {
 
     run_migrations(&pool).await;
 
-    // Spawn nightly reconciliation report generator
+    // Spawn nightly reconciliation report generator — runs at midnight local server time
     {
         let sched_pool = pool.clone();
         tokio::spawn(async move {
             loop {
+                // Calculate duration until next midnight
+                let now = chrono::Local::now();
+                let tomorrow_midnight = (now + chrono::Duration::days(1))
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                let local_tomorrow = tomorrow_midnight
+                    .and_local_timezone(chrono::Local)
+                    .latest()
+                    .unwrap_or_else(|| chrono::Local::now() + chrono::Duration::hours(1));
+                let sleep_duration = (local_tomorrow - now).to_std().unwrap_or(
+                    std::time::Duration::from_secs(60)
+                );
+                tokio::time::sleep(sleep_duration).await;
                 routes::payments::generate_reconciliation_report(&sched_pool).await;
-                tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)).await;
             }
         });
     }

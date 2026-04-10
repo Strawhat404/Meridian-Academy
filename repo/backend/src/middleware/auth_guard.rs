@@ -101,14 +101,58 @@ impl<'r> FromRequest<'r> for AuthenticatedUser {
                             }
                         }
 
-                        // --- Load permissions from role_permissions join ---
+                        // --- FAIL-CLOSED: Re-check user state from DB (fresh role, active, not soft-deleted) ---
+                        let user_state = sqlx::query_as::<_, (String, bool, Option<chrono::NaiveDateTime>)>(
+                            "SELECT role, is_active, soft_deleted_at FROM users WHERE id = ?",
+                        )
+                        .bind(&claims.sub)
+                        .fetch_optional(pool)
+                        .await;
+
+                        let db_role = match user_state {
+                            Ok(Some((role, is_active, soft_deleted_at))) => {
+                                if !is_active {
+                                    log::warn!("Auth denied: user {} is deactivated", claims.sub);
+                                    return Outcome::Error((
+                                        Status::Forbidden,
+                                        "Account deactivated",
+                                    ));
+                                }
+                                if soft_deleted_at.is_some() {
+                                    log::warn!("Auth denied: user {} is soft-deleted", claims.sub);
+                                    return Outcome::Error((
+                                        Status::Forbidden,
+                                        "Account scheduled for deletion",
+                                    ));
+                                }
+                                role
+                            }
+                            Ok(None) => {
+                                return Outcome::Error((
+                                    Status::Unauthorized,
+                                    "User not found",
+                                ));
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "User state DB check failed for {}: {} — denying (fail-closed)",
+                                    claims.sub, e
+                                );
+                                return Outcome::Error((
+                                    Status::ServiceUnavailable,
+                                    "User verification unavailable",
+                                ));
+                            }
+                        };
+
+                        // --- Load permissions from role_permissions using FRESH DB role ---
                         let permissions: Vec<String> = sqlx::query_scalar::<_, String>(
                             "SELECT p.name FROM permissions p \
                              INNER JOIN role_permissions rp ON rp.permission_id = p.id \
                              INNER JOIN roles r ON r.id = rp.role_id \
                              WHERE r.name = ?",
                         )
-                        .bind(&claims.role)
+                        .bind(&db_role)
                         .fetch_all(pool)
                         .await
                         .unwrap_or_default();
@@ -116,7 +160,7 @@ impl<'r> FromRequest<'r> for AuthenticatedUser {
                         Outcome::Success(AuthenticatedUser {
                             user_id: claims.sub,
                             username: claims.username,
-                            role: claims.role,
+                            role: db_role,
                             session_id: claims.session_id,
                             permissions,
                         })

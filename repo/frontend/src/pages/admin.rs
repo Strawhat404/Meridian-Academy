@@ -65,6 +65,38 @@ struct ClearFlag {
     order_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CaseWithSla {
+    case: AdminCase,
+    first_response_overdue: bool,
+    resolution_overdue: bool,
+    hours_until_first_response: Option<f64>,
+    hours_until_resolution: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdminCase {
+    id: String,
+    order_id: String,
+    reporter_id: String,
+    assigned_to: Option<String>,
+    case_type: String,
+    subject: String,
+    description: String,
+    status: String,
+    priority: String,
+}
+
+#[derive(Serialize)]
+struct UpdateCaseStatus {
+    status: String,
+}
+
+#[derive(Serialize)]
+struct AssignCase {
+    assigned_to: String,
+}
+
 #[component]
 pub fn AdminPage() -> Element {
     let stats = use_resource(|| async {
@@ -101,6 +133,17 @@ pub fn AdminPage() -> Element {
         }
     });
 
+    // All cases (for admin management)
+    let all_cases = use_resource(move || async move {
+        if *active_tab.read() == "cases" {
+            api::get::<Vec<CaseWithSla>>("/api/cases/").await.unwrap_or_default()
+        } else {
+            vec![]
+        }
+    });
+
+    let mut case_msg = use_signal(|| Option::<String>::None);
+
     // Sensitive word form
     let mut sw_word = use_signal(String::new);
     let mut sw_action = use_signal(|| "replace".to_string());
@@ -123,6 +166,7 @@ pub fn AdminPage() -> Element {
                 button { class: if *active_tab.read() == "audit" { "btn" } else { "btn btn-secondary" }, onclick: move |_| active_tab.set("audit".to_string()), "Audit Log" }
                 button { class: if *active_tab.read() == "sensitive" { "btn" } else { "btn btn-secondary" }, onclick: move |_| active_tab.set("sensitive".to_string()), "Sensitive Words" }
                 button { class: if *active_tab.read() == "flagged" { "btn" } else { "btn btn-secondary" }, onclick: move |_| active_tab.set("flagged".to_string()), "Flagged Orders" }
+                button { class: if *active_tab.read() == "cases" { "btn" } else { "btn btn-secondary" }, onclick: move |_| active_tab.set("cases".to_string()), "Cases" }
             }
 
             // Overview tab
@@ -301,6 +345,106 @@ pub fn AdminPage() -> Element {
                     }
                 } else {
                     p { "Loading flagged orders..." }
+                }
+            }
+
+            // Cases management tab
+            if *active_tab.read() == "cases" {
+                if let Some(msg) = case_msg.read().as_ref() {
+                    div { class: "status-badge status-active", "{msg}" }
+                }
+                if let Some(cases) = all_cases.read().as_ref() {
+                    if cases.is_empty() {
+                        p { "No cases found." }
+                    } else {
+                        div { class: "table-container",
+                            table { class: "data-table",
+                                thead {
+                                    tr {
+                                        th { "Subject" }
+                                        th { "Type" }
+                                        th { "Reporter" }
+                                        th { "Assigned To" }
+                                        th { "Priority" }
+                                        th { "Status" }
+                                        th { "SLA" }
+                                        th { "Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for cws in cases.iter() {
+                                        tr { key: "{cws.case.id}",
+                                            td {
+                                                Link { to: Route::AdminCaseDetail { case_id: cws.case.id.clone() }, "{cws.case.subject}" }
+                                            }
+                                            td { "{cws.case.case_type}" }
+                                            td { "{cws.case.reporter_id}" }
+                                            td {
+                                                if let Some(ref a) = cws.case.assigned_to {
+                                                    "{a}"
+                                                } else {
+                                                    span { style: "color: #999;", "Unassigned" }
+                                                }
+                                            }
+                                            td {
+                                                span { class: "priority-badge priority-{cws.case.priority}", "{cws.case.priority}" }
+                                            }
+                                            td {
+                                                span { class: "status-badge status-{cws.case.status}", "{cws.case.status}" }
+                                            }
+                                            td {
+                                                if cws.first_response_overdue {
+                                                    span { class: "status-badge status-rejected", "Response Overdue" }
+                                                } else if cws.resolution_overdue {
+                                                    span { class: "status-badge status-rejected", "Resolution Overdue" }
+                                                } else {
+                                                    span { class: "status-badge status-active", "On Track" }
+                                                }
+                                            }
+                                            td { style: "display:flex;gap:4px;flex-wrap:wrap;",
+                                                // Status transition buttons based on current status
+                                                {
+                                                    let transitions: Vec<(&str, &str)> = match cws.case.status.as_str() {
+                                                        "submitted" => vec![("in_review", "Start Review")],
+                                                        "in_review" => vec![("awaiting_evidence", "Request Evidence"), ("arbitrated", "Arbitrate")],
+                                                        "awaiting_evidence" => vec![("in_review", "Resume Review"), ("arbitrated", "Arbitrate")],
+                                                        "arbitrated" => vec![("approved", "Approve"), ("denied", "Deny")],
+                                                        "approved" | "denied" => vec![("closed", "Close")],
+                                                        _ => vec![],
+                                                    };
+                                                    rsx! {
+                                                        for (status, label) in transitions {
+                                                            button {
+                                                                class: "btn btn-small",
+                                                                onclick: {
+                                                                    let case_id = cws.case.id.clone();
+                                                                    let new_status = status.to_string();
+                                                                    move |_| {
+                                                                        let case_id = case_id.clone();
+                                                                        let data = UpdateCaseStatus { status: new_status.clone() };
+                                                                        spawn(async move {
+                                                                            let url = format!("/api/cases/{}/status", case_id);
+                                                                            match api::put_empty(&url, &data).await {
+                                                                                Ok(_) => case_msg.set(Some("Status updated".to_string())),
+                                                                                Err(e) => case_msg.set(Some(e)),
+                                                                            }
+                                                                        });
+                                                                    }
+                                                                },
+                                                                "{label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    p { "Loading cases..." }
                 }
             }
         }

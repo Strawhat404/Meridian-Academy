@@ -21,14 +21,18 @@ pub fn NavBar() -> Element {
                     Link { to: Route::Orders {}, "Orders" }
                     Link { to: Route::Reviews {}, "Reviews" }
                     Link { to: Route::Cases {}, "Cases" }
-                    if u.role == "administrator" {
+                    if u.role == "administrator" || u.role == "academic_staff" {
                         Link { to: Route::Admin {}, "Admin" }
                     }
                     Link { to: Route::Profile {}, "{u.first_name}" }
                     button {
                         class: "btn btn-logout",
                         onclick: move |_| {
-                            auth::logout();
+                            spawn(async move {
+                                auth::logout().await;
+                                web_sys::window()
+                                    .and_then(|w| w.location().set_href("/login").ok());
+                            });
                         },
                         "Sign Out"
                     }

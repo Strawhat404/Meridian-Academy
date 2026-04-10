@@ -1169,4 +1169,895 @@ mod tests {
             .send().await.expect("Backend must be reachable");
         assert_eq!(resp.status(), 422, "7th image must be rejected with 422");
     }
+
+    // ===== LOGOUT INVALIDATES SESSION =====
+
+    #[tokio::test]
+    async fn test_logout_invalidates_session() {
+        let c = client();
+        let id = uid();
+        let user = create_user(&c, &format!("lo_{}", id), &format!("lo{}@m.edu", id), "student").await;
+
+        // Verify token works before logout
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", user.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Token must work before logout");
+
+        // Logout
+        let resp = c.post(&format!("{}/api/auth/logout", backend_url()))
+            .header("Authorization", format!("Bearer {}", user.token))
+            .header("Content-Type", "application/json")
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Logout must succeed");
+
+        // Token must be rejected after logout (session invalidated)
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", user.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Token must be rejected after logout");
+    }
+
+    // ===== SUBMISSION TEMPLATES ENDPOINT =====
+
+    #[tokio::test]
+    async fn test_templates_endpoint_returns_templates() {
+        let c = client();
+        let id = uid();
+        let user = create_user(&c, &format!("tpl_{}", id), &format!("tpl{}@m.edu", id), "student").await;
+
+        let resp = c.get(&format!("{}/api/submissions/templates", backend_url()))
+            .header("Authorization", format!("Bearer {}", user.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Templates endpoint must return 200");
+
+        let templates: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert!(templates.len() >= 4, "Must have at least 4 templates, got {}", templates.len());
+
+        // Each template must have required structure
+        for tpl in &templates {
+            assert!(tpl["id"].is_string(), "Template must have id");
+            assert!(tpl["name"].is_string(), "Template must have name");
+            assert!(tpl["submission_type"].is_string(), "Template must have submission_type");
+            assert!(tpl["required_fields"].is_array(), "Template must have required_fields");
+            assert!(tpl["description"].is_string(), "Template must have description");
+        }
+
+        // Verify known template types exist
+        let types: Vec<&str> = templates.iter()
+            .filter_map(|t| t["submission_type"].as_str())
+            .collect();
+        assert!(types.contains(&"journal_article"), "Must have journal_article template");
+        assert!(types.contains(&"thesis"), "Must have thesis template");
+    }
+
+    // ===== RECONCILIATION RECORDS GENERATED ON ORDER CREATION =====
+
+    #[tokio::test]
+    async fn test_reconciliation_records_generated_on_order_creation() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rec_{}", id), &format!("rec{}@m.edu", id), "student").await;
+
+        // Create an order with 2 line items
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal A", "series_name": "Series X", "quantity": 3, "unit_price": 10.0},
+                    {"publication_title": "Journal B", "series_name": "Series Y", "quantity": 2, "unit_price": 15.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+
+        // Get reconciliation records for this order
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert!(records.len() >= 2, "Must have at least 2 reconciliation records (one per line item), got {}", records.len());
+
+        // Deep assertions: each record must have correct structure, status, and quantities
+        let mut found_qty_3 = false;
+        let mut found_qty_2 = false;
+        for rec in &records {
+            // Status must be pending (no deliveries yet)
+            assert_eq!(rec["status"].as_str().unwrap(), "pending", "Initial records must be pending");
+            // received_qty must be 0 (nothing received yet)
+            assert_eq!(rec["received_qty"].as_i64().unwrap(), 0, "Initial received_qty must be 0");
+            // expected_qty must match one of the line item quantities
+            let expected = rec["expected_qty"].as_i64().unwrap();
+            assert!(expected > 0, "expected_qty must be positive, got {}", expected);
+            if expected == 3 { found_qty_3 = true; }
+            if expected == 2 { found_qty_2 = true; }
+            // order_id must match the created order
+            assert_eq!(rec["order_id"].as_str().unwrap(), order_id, "order_id must match");
+            // line_item_id must be present
+            assert!(rec["line_item_id"].is_string(), "line_item_id must be set");
+            // issue_identifier must be present
+            assert!(rec["issue_identifier"].is_string(), "issue_identifier must be set");
+        }
+        assert!(found_qty_3, "Must have a reconciliation record with expected_qty=3 (from Journal A)");
+        assert!(found_qty_2, "Must have a reconciliation record with expected_qty=2 (from Journal B)");
+    }
+
+    // ===== RECONCILIATION RECORDS UPDATED ON FULFILLMENT EVENT =====
+
+    #[tokio::test]
+    async fn test_reconciliation_records_updated_on_fulfillment() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rfl_{}", id), &format!("rfl{}@m.edu", id), "student").await;
+
+        // Create order
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal A", "series_name": "Series Z", "quantity": 1, "unit_price": 10.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+        let line_items = order_body["line_items"].as_array().unwrap();
+        let line_item_id = line_items[0]["id"].as_str().unwrap().to_string();
+
+        // Log a delivered fulfillment event with issue_identifier
+        let resp = c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id,
+                "line_item_id": line_item_id,
+                "event_type": "delivered",
+                "issue_identifier": format!("ISSUE-{}", id),
+                "reason": "Delivered on time",
+                "expected_date": null,
+                "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Fulfillment event must succeed");
+
+        // Get reconciliation records — should include the auto-generated one
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        // Should have records from both order creation and fulfillment event
+        assert!(!records.is_empty(), "Must have reconciliation records after fulfillment");
+
+        // Find the record for our issue_identifier
+        let issue_rec = records.iter().find(|r| {
+            r["issue_identifier"].as_str().map_or(false, |i| i.contains(&id))
+        });
+        assert!(issue_rec.is_some(), "Must have a reconciliation record for the fulfillment event issue");
+
+        // Verify status/quantity transition semantics for the delivered event record
+        let rec = issue_rec.unwrap();
+        let received = rec["received_qty"].as_i64().unwrap();
+        let expected = rec["expected_qty"].as_i64().unwrap();
+        // order had qty=1, one delivery logged → received=1, expected=1
+        assert_eq!(received, 1, "received_qty must be 1 after single delivery of qty-1 item");
+        assert_eq!(expected, 1, "expected_qty must be 1 (from line item quantity)");
+        assert_eq!(rec["status"].as_str().unwrap(), "matched",
+            "Status must be 'matched' when received_qty == expected_qty (1 == 1)");
+        assert_eq!(rec["order_id"].as_str().unwrap(), order_id, "order_id must match");
+        assert!(rec["line_item_id"].is_string(), "line_item_id must be set");
+    }
+
+    // ===== RECONCILIATION QUANTITY INCREMENTS ON MULTIPLE DELIVERIES =====
+
+    #[tokio::test]
+    async fn test_reconciliation_quantity_increments_on_deliveries() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rqi_{}", id), &format!("rqi{}@m.edu", id), "student").await;
+
+        // Create order with quantity 2
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal Q", "series_name": "Series Q", "quantity": 2, "unit_price": 10.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+        let line_items = order_body["line_items"].as_array().unwrap();
+        let li_id = line_items[0]["id"].as_str().unwrap().to_string();
+
+        let issue_tag = format!("MULTI-{}", id);
+
+        // First delivery
+        let resp = c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id, "line_item_id": li_id,
+                "event_type": "delivered", "issue_identifier": issue_tag,
+                "reason": "First delivery", "expected_date": null, "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        // Check after first delivery — should be discrepancy (1 of 2)
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec = records.iter().find(|r| r["issue_identifier"].as_str() == Some(issue_tag.as_str()));
+        assert!(rec.is_some(), "Record must exist after first delivery");
+        let rec = rec.unwrap();
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 1, "received_qty must be 1 after first delivery");
+        assert_eq!(rec["status"].as_str().unwrap(), "discrepancy", "Status must be discrepancy (1 of 2)");
+
+        // Second delivery
+        let resp = c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id, "line_item_id": li_id,
+                "event_type": "delivered", "issue_identifier": issue_tag,
+                "reason": "Second delivery", "expected_date": null, "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        // Check after second delivery — should be matched (2 of 2)
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec = records.iter().find(|r| r["issue_identifier"].as_str() == Some(issue_tag.as_str()));
+        assert!(rec.is_some(), "Record must exist after second delivery");
+        let rec = rec.unwrap();
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 2, "received_qty must be 2 after second delivery");
+        assert_eq!(rec["status"].as_str().unwrap(), "matched", "Status must be matched (2 of 2)");
+    }
+
+    // ===== RECONCILIATION: NON-DELIVERY EVENT CREATES PENDING RECORD =====
+
+    #[tokio::test]
+    async fn test_reconciliation_non_delivery_event_creates_pending_record() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rnde_{}", id), &format!("rnde{}@m.edu", id), "student").await;
+
+        // Create order
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal M", "series_name": "Series M", "quantity": 3, "unit_price": 10.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+        let li_id = order_body["line_items"][0]["id"].as_str().unwrap().to_string();
+
+        let issue_tag = format!("MISS-{}", id);
+
+        // Log a missing_issue event (non-delivery)
+        let resp = c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id, "line_item_id": li_id,
+                "event_type": "missing_issue", "issue_identifier": issue_tag,
+                "reason": "Issue not received", "expected_date": null, "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        // Get reconciliation records
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+
+        // Find the record for our missing_issue event
+        let rec = records.iter().find(|r| r["issue_identifier"].as_str() == Some(issue_tag.as_str()));
+        assert!(rec.is_some(), "Must have a reconciliation record for missing_issue event");
+        let rec = rec.unwrap();
+
+        // Non-delivery events create a pending record with received_qty=0
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 0, "missing_issue must not increment received_qty");
+        assert_eq!(rec["status"].as_str().unwrap(), "pending", "Non-delivery event must create pending record");
+        assert!(rec["expected_qty"].as_i64().unwrap() > 0, "expected_qty must be set from line item quantity");
+    }
+
+    // ===== RECONCILIATION: DELIVERY AFTER MISSING_ISSUE UPDATES EXISTING RECORD =====
+
+    #[tokio::test]
+    async fn test_reconciliation_delivery_updates_pending_record() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rdup_{}", id), &format!("rdup{}@m.edu", id), "student").await;
+
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal N", "series_name": "Series N", "quantity": 1, "unit_price": 10.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+        let li_id = order_body["line_items"][0]["id"].as_str().unwrap().to_string();
+
+        let issue_tag = format!("DUPD-{}", id);
+
+        // First: log a missing_issue (creates pending record, received=0)
+        c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id, "line_item_id": li_id,
+                "event_type": "missing_issue", "issue_identifier": issue_tag,
+                "reason": "Initially missing", "expected_date": null, "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+
+        // Then: log a delivery for the same issue (should update existing record, received=1)
+        c.post(&format!("{}/api/orders/fulfillment", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({
+                "order_id": order_id, "line_item_id": li_id,
+                "event_type": "delivered", "issue_identifier": issue_tag,
+                "reason": "Reshipment delivered", "expected_date": null, "actual_date": null
+            }))
+            .send().await.expect("Backend must be reachable");
+
+        // Check: the existing pending record should now be updated
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec = records.iter().find(|r| r["issue_identifier"].as_str() == Some(issue_tag.as_str()));
+        assert!(rec.is_some(), "Record must still exist after delivery update");
+        let rec = rec.unwrap();
+
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 1, "received_qty must be 1 after delivery");
+        // With qty=1 and received=1, should be matched
+        assert_eq!(rec["status"].as_str().unwrap(), "matched",
+            "Status must be matched after delivery brings received up to expected");
+    }
+
+    // ===== RECONCILIATION: MANUAL UPDATE VIA PUT ENDPOINT =====
+
+    #[tokio::test]
+    async fn test_reconciliation_manual_update_status_transitions() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rmu_{}", id), &format!("rmu{}@m.edu", id), "student").await;
+
+        // Create order with qty=5
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [
+                    {"publication_title": "Journal U", "series_name": "Series U", "quantity": 5, "unit_price": 10.0}
+                ]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(order_resp.status(), 200);
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+
+        // Get auto-generated reconciliation records
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert!(!records.is_empty(), "Must have initial reconciliation records");
+        let rec_id = records[0]["id"].as_str().unwrap().to_string();
+
+        // Verify initial state: pending, expected=5, received=0
+        assert_eq!(records[0]["status"].as_str().unwrap(), "pending");
+        assert_eq!(records[0]["expected_qty"].as_i64().unwrap(), 5);
+        assert_eq!(records[0]["received_qty"].as_i64().unwrap(), 0);
+
+        // Manual update: set received_qty=3 → should become "discrepancy" (3 != 5)
+        let resp = c.put(&format!("{}/api/orders/reconciliation/{}", backend_url(), rec_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({ "received_qty": 3, "notes": "Partial shipment received" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Manual reconciliation update must succeed");
+
+        // Verify transition to discrepancy
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec = records.iter().find(|r| r["id"].as_str() == Some(rec_id.as_str())).unwrap();
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 3, "received_qty must be 3 after manual update");
+        assert_eq!(rec["status"].as_str().unwrap(), "discrepancy",
+            "Status must be 'discrepancy' when received (3) != expected (5)");
+
+        // Manual update: set received_qty=5 → should become "matched" (5 == 5)
+        let resp = c.put(&format!("{}/api/orders/reconciliation/{}", backend_url(), rec_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({ "received_qty": 5, "notes": "All items received" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Second manual update must succeed");
+
+        // Verify transition to matched
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec = records.iter().find(|r| r["id"].as_str() == Some(rec_id.as_str())).unwrap();
+        assert_eq!(rec["received_qty"].as_i64().unwrap(), 5, "received_qty must be 5 after final update");
+        assert_eq!(rec["status"].as_str().unwrap(), "matched",
+            "Status must be 'matched' when received (5) == expected (5)");
+    }
+
+    // ===== RECONCILIATION: STUDENT CANNOT UPDATE RECORDS =====
+
+    #[tokio::test]
+    async fn test_student_cannot_update_reconciliation() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("rsu_{}", id), &format!("rsu{}@m.edu", id), "student").await;
+
+        // Create order
+        let order_resp = c.post(&format!("{}/api/orders", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [{"publication_title": "J", "series_name": "S", "quantity": 1, "unit_price": 5.0}]
+            }))
+            .send().await.expect("Backend must be reachable");
+        let order_body: serde_json::Value = order_resp.json().await.unwrap();
+        let order_id = order_body["order"]["id"].as_str().unwrap().to_string();
+
+        // Get the auto-generated record ID
+        let resp = c.get(&format!("{}/api/orders/{}/reconciliation", backend_url(), order_id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        let records: Vec<serde_json::Value> = resp.json().await.unwrap();
+        let rec_id = records[0]["id"].as_str().unwrap().to_string();
+
+        // Student tries to update reconciliation — must be 403
+        let resp = c.put(&format!("{}/api/orders/reconciliation/{}", backend_url(), rec_id))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({ "received_qty": 1 }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 403, "Student must not update reconciliation records, got {}", resp.status());
+    }
+
+    // ===== ACADEMIC STAFF CANNOT DEACTIVATE USERS =====
+
+    #[tokio::test]
+    async fn test_academic_staff_cannot_deactivate_users() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+
+        // Create an academic_staff user
+        let staff = create_user(&c, &format!("stfd_{}", id), &format!("stfd{}@m.edu", id), "academic_staff").await;
+
+        // Create a target user to deactivate
+        let target = create_user(&c, &format!("tgt_{}", id), &format!("tgt{}@m.edu", id), "student").await;
+
+        // Staff tries to deactivate — must be forbidden
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), target.user.id))
+            .header("Authorization", format!("Bearer {}", staff.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 403, "Academic staff must not deactivate users, got {}", resp.status());
+
+        // Admin can deactivate — must succeed
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), target.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 204, "Admin must be able to deactivate users, got {}", resp.status());
+    }
+
+    // ===== DEACTIVATED USER SESSION REJECTED =====
+
+    #[tokio::test]
+    async fn test_deactivated_user_token_rejected() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+
+        // Create and login as a student
+        let student = create_user(&c, &format!("deac_{}", id), &format!("deac{}@m.edu", id), "student").await;
+        let student_token = student.token.clone();
+
+        // Verify the token works
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", student_token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Student token should work before deactivation");
+
+        // Admin deactivates the student
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), student.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 204);
+
+        // Student's old token should now be rejected
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", student_token))
+            .send().await.expect("Backend must be reachable");
+        assert!(resp.status() == 401 || resp.status() == 403,
+            "Deactivated user's token must be rejected, got {}", resp.status());
+    }
+
+    // ===== ROLE CHANGE INVALIDATES SESSION =====
+
+    #[tokio::test]
+    async fn test_role_change_invalidates_session() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+
+        // Create a student
+        let student = create_user(&c, &format!("rc_{}", id), &format!("rc{}@m.edu", id), "student").await;
+        let old_token = student.token.clone();
+
+        // Admin changes the student's role to instructor
+        let resp = c.put(&format!("{}/api/users/{}/role", backend_url(), student.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({ "role": "instructor" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Role change must succeed");
+
+        // Old token should be invalidated (session marked inactive)
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", old_token))
+            .send().await.expect("Backend must be reachable");
+        assert!(resp.status() == 401 || resp.status() == 403,
+            "Old session should be invalidated after role change, got {}", resp.status());
+    }
+
+    // ===== CREATION ENDPOINTS REQUIRE PERMISSIONS =====
+
+    #[tokio::test]
+    async fn test_order_creation_requires_permission() {
+        let c = client();
+        // Use an expired/invalid token to ensure unauthenticated requests fail
+        let resp = c.post(&format!("{}/api/orders/", backend_url()))
+            .header("Authorization", "Bearer invalid_token")
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [{"content_id": "x", "quantity": 1, "unit_price": 10.0}]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Unauthenticated order creation must be rejected");
+    }
+
+    // ===== ADDRESS DEFAULT INVARIANT =====
+
+    #[tokio::test]
+    async fn test_set_default_address_invalid_id_returns_not_found() {
+        let c = client();
+        let id = uid();
+        let student = create_user(&c, &format!("addr_{}", id), &format!("addr{}@m.edu", id), "student").await;
+
+        // Try to set a non-existent address as default
+        let resp = c.put(&format!("{}/api/users/addresses/default", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({ "address_id": "nonexistent-address-id" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 404, "Setting default on non-existent address must return 404, got {}", resp.status());
+    }
+
+    // ===== SOFT DELETE LIFECYCLE =====
+
+    #[tokio::test]
+    async fn test_soft_delete_and_cancel() {
+        let c = client();
+        let id = uid();
+        let student = create_user(&c, &format!("sd_{}", id), &format!("sd{}@m.edu", id), "student").await;
+
+        // Request account deletion
+        let resp = c.post(&format!("{}/api/auth/request-deletion", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Deletion request must succeed");
+
+        // Cancel the deletion
+        let resp = c.post(&format!("{}/api/auth/cancel-deletion", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Cancellation must succeed");
+
+        // User should still be able to access their profile
+        let resp = c.get(&format!("{}/api/auth/me", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "User should still be accessible after cancellation");
+    }
+
+    // ===== RESET TOKEN LIFECYCLE =====
+
+    #[tokio::test]
+    async fn test_reset_token_generate_and_use() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+
+        // Create a user to reset
+        let target = create_user(&c, &format!("rst_{}", id), &format!("rst{}@m.edu", id), "student").await;
+
+        // Admin generates a reset token for the target user
+        let resp = c.post(&format!("{}/api/auth/generate-reset-token", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({ "user_id": target.user.id }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Admin must be able to generate reset token, got {}", resp.status());
+
+        #[derive(Deserialize)]
+        struct ResetResp { token: String, expires_at: String }
+        let reset: ResetResp = resp.json().await.expect("Valid reset token JSON");
+        assert!(!reset.token.is_empty(), "Token must not be empty");
+        assert!(!reset.expires_at.is_empty(), "Expiry must not be empty");
+
+        // Use the reset token to change the password
+        let resp = c.post(&format!("{}/api/auth/use-reset-token", backend_url()))
+            .json(&json!({ "token": reset.token, "new_password": "NewP@ss999" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Reset token usage must succeed, got {}", resp.status());
+
+        // Verify the old password no longer works
+        let resp = c.post(&format!("{}/api/auth/login", backend_url()))
+            .json(&json!({ "username": format!("rst_{}", id), "password": "admin123" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Old password must be rejected after reset");
+
+        // Verify the new password works
+        let resp = c.post(&format!("{}/api/auth/login", backend_url()))
+            .json(&json!({ "username": format!("rst_{}", id), "password": "NewP@ss999" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "New password must work after reset");
+    }
+
+    #[tokio::test]
+    async fn test_reset_token_cannot_be_reused() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+
+        let target = create_user(&c, &format!("rr_{}", id), &format!("rr{}@m.edu", id), "student").await;
+
+        // Generate and use the token
+        let resp = c.post(&format!("{}/api/auth/generate-reset-token", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .json(&json!({ "user_id": target.user.id }))
+            .send().await.expect("Backend must be reachable");
+        #[derive(Deserialize)]
+        struct ResetResp { token: String, expires_at: String }
+        let reset: ResetResp = resp.json().await.unwrap();
+
+        let resp = c.post(&format!("{}/api/auth/use-reset-token", backend_url()))
+            .json(&json!({ "token": reset.token, "new_password": "First123" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200);
+
+        // Try to reuse the same token — must fail
+        let resp = c.post(&format!("{}/api/auth/use-reset-token", backend_url()))
+            .json(&json!({ "token": reset.token, "new_password": "Second123" }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 410, "Reused reset token must return Gone, got {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn test_student_cannot_generate_reset_token() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("sg_{}", id), &format!("sg{}@m.edu", id), "student").await;
+
+        // Student tries to generate a reset token — must be forbidden
+        let resp = c.post(&format!("{}/api/auth/generate-reset-token", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .json(&json!({ "user_id": student.user.id }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 403, "Student must not generate reset tokens, got {}", resp.status());
+    }
+
+    // ===== EXPORT MY DATA =====
+
+    #[tokio::test]
+    async fn test_export_my_data_returns_scoped_data() {
+        let c = client();
+        let id = uid();
+        let student = create_user(&c, &format!("exp_{}", id), &format!("exp{}@m.edu", id), "student").await;
+
+        let resp = c.get(&format!("{}/api/auth/export-my-data", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Export must succeed, got {}", resp.status());
+
+        let body: serde_json::Value = resp.json().await.expect("Valid JSON export");
+
+        // Verify the export contains the user's own profile data
+        assert_eq!(body["user_profile"]["username"].as_str(), Some(&format!("exp_{}", id) as &str));
+        assert_eq!(body["user_profile"]["id"].as_str(), Some(student.user.id.as_str()));
+
+        // Verify it has the expected top-level keys
+        assert!(body["addresses"].is_array());
+        assert!(body["submissions"].is_array());
+        assert!(body["orders"].is_array());
+        assert!(body["reviews"].is_array());
+        assert!(body["cases"].is_array());
+        assert!(body["exported_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_export_my_data_unauthenticated_rejected() {
+        let c = client();
+        let resp = c.get(&format!("{}/api/auth/export-my-data", backend_url()))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Unauthenticated export must be rejected");
+    }
+
+    // ===== CLEANUP SOFT DELETED =====
+
+    #[tokio::test]
+    async fn test_cleanup_soft_deleted_admin_only() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("cu_{}", id), &format!("cu{}@m.edu", id), "student").await;
+
+        // Student must not be able to run cleanup
+        let resp = c.post(&format!("{}/api/admin/cleanup-soft-deleted", backend_url()))
+            .header("Authorization", format!("Bearer {}", student.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 403, "Student must not run cleanup, got {}", resp.status());
+
+        // Admin can run cleanup successfully
+        let resp = c.post(&format!("{}/api/admin/cleanup-soft-deleted", backend_url()))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 200, "Admin cleanup must succeed, got {}", resp.status());
+
+        let body: serde_json::Value = resp.json().await.expect("Valid JSON response");
+        assert!(body["deleted_count"].is_number(), "Response must include deleted_count");
+    }
+
+    // ===== CREATION ENDPOINT PERMISSION DENIAL (unauthenticated) =====
+
+    #[tokio::test]
+    async fn test_review_creation_requires_authentication() {
+        let c = client();
+        let resp = c.post(&format!("{}/api/reviews/", backend_url()))
+            .header("Authorization", "Bearer invalid_token")
+            .json(&json!({
+                "order_id": "fake-order", "line_item_id": "fake-item",
+                "rating": 5, "title": "Great", "body": "Excellent"
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Unauthenticated review creation must be rejected, got {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn test_case_creation_requires_authentication() {
+        let c = client();
+        let resp = c.post(&format!("{}/api/cases/", backend_url()))
+            .header("Authorization", "Bearer invalid_token")
+            .json(&json!({
+                "order_id": "fake-order", "case_type": "return",
+                "subject": "Test", "description": "Test case"
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Unauthenticated case creation must be rejected, got {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn test_followup_creation_requires_authentication() {
+        let c = client();
+        let resp = c.post(&format!("{}/api/reviews/followup", backend_url()))
+            .header("Authorization", "Bearer invalid_token")
+            .json(&json!({
+                "parent_review_id": "fake-review",
+                "rating": 4, "title": "Follow-up", "body": "Updated"
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 401, "Unauthenticated followup creation must be rejected, got {}", resp.status());
+    }
+
+    // ===== DEACTIVATED USER DENIED FROM CREATION ENDPOINTS =====
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_create_order() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("do_{}", id), &format!("do{}@m.edu", id), "student").await;
+        let token = student.token.clone();
+
+        // Admin deactivates the student
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), student.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 204);
+
+        // Deactivated student tries to create an order
+        let resp = c.post(&format!("{}/api/orders/", backend_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({
+                "subscription_period": "monthly",
+                "line_items": [{"content_id": "x", "quantity": 1, "unit_price": 10.0}]
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert!(resp.status() == 401 || resp.status() == 403,
+            "Deactivated user must not create orders, got {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_create_review() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("dr_{}", id), &format!("dr{}@m.edu", id), "student").await;
+        let token = student.token.clone();
+
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), student.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 204);
+
+        let resp = c.post(&format!("{}/api/reviews/", backend_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({
+                "order_id": "fake", "line_item_id": "fake",
+                "rating": 5, "title": "X", "body": "Y"
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert!(resp.status() == 401 || resp.status() == 403,
+            "Deactivated user must not create reviews, got {}", resp.status());
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_create_case() {
+        let c = client();
+        let id = uid();
+        let admin = login_admin(&c).await;
+        let student = create_user(&c, &format!("dc_{}", id), &format!("dc{}@m.edu", id), "student").await;
+        let token = student.token.clone();
+
+        let resp = c.delete(&format!("{}/api/users/{}", backend_url(), student.user.id))
+            .header("Authorization", format!("Bearer {}", admin.token))
+            .send().await.expect("Backend must be reachable");
+        assert_eq!(resp.status(), 204);
+
+        let resp = c.post(&format!("{}/api/cases/", backend_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({
+                "order_id": "fake", "case_type": "return",
+                "subject": "Test", "description": "Test"
+            }))
+            .send().await.expect("Backend must be reachable");
+        assert!(resp.status() == 401 || resp.status() == 403,
+            "Deactivated user must not create cases, got {}", resp.status());
+    }
 }
