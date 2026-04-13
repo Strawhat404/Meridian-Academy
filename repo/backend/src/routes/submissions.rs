@@ -425,6 +425,14 @@ pub async fn create_submission(pool: &State<DbPool>, user: AuthenticatedUser, re
     .await
     .map_err(|e| { log::error!("create_submission: insert submission failed: {}", e); Status::InternalServerError })?;
 
+    crate::notifications::create_notification(
+        pool.inner(),
+        &user.user_id,
+        crate::notifications::PREF_SUBMISSIONS,
+        "Submission created",
+        &format!("Your submission '{}' has been created with status '{}'.", processed_title, status),
+    ).await;
+
     Ok(Json(Submission {
         id, author_id: user.user_id, title: processed_title, summary: processed_summary,
         submission_type: req.submission_type.clone(), status: status.to_string(),

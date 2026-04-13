@@ -54,6 +54,14 @@ pub async fn create_review(pool: &State<DbPool>, user: AuthenticatedUser, req: J
     .bind(req.rating).bind(&req.title).bind(&req.body)
     .execute(pool.inner()).await.map_err(|e| { log::error!("create_review: insert review failed: {}", e); Status::InternalServerError })?;
 
+    crate::notifications::create_notification(
+        pool.inner(),
+        &user.user_id,
+        crate::notifications::PREF_REVIEWS,
+        "Review posted",
+        &format!("Your review '{}' has been posted.", req.title),
+    ).await;
+
     Ok(Json(Review {
         id, order_id: req.order_id.clone(), line_item_id: req.line_item_id.clone(),
         user_id: user.user_id, rating: req.rating, title: req.title.clone(),
@@ -103,6 +111,14 @@ pub async fn create_followup(pool: &State<DbPool>, user: AuthenticatedUser, req:
             .bind(&id).bind(&order_id).bind(&user.user_id)
             .bind(req.rating).bind(&req.title).bind(&req.body).bind(&pid)
             .execute(pool.inner()).await.map_err(|e| { log::error!("create_followup: insert followup review failed: {}", e); Status::InternalServerError })?;
+
+            crate::notifications::create_notification(
+                pool.inner(),
+                &user.user_id,
+                crate::notifications::PREF_REVIEWS,
+                "Follow-up review posted",
+                &format!("Your follow-up review '{}' has been posted.", req.title),
+            ).await;
 
             Ok(Json(Review {
                 id, order_id, line_item_id: None, user_id: user.user_id,

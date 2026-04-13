@@ -93,6 +93,14 @@ pub async fn create_case(pool: &State<DbPool>, user: AuthenticatedUser, req: Jso
     .bind(&now).bind(&first_response_due).bind(&resolution_target)
     .execute(pool.inner()).await.map_err(|e| { log::error!("create_case: insert case failed: {}", e); Status::InternalServerError })?;
 
+    crate::notifications::create_notification(
+        pool.inner(),
+        &user.user_id,
+        crate::notifications::PREF_CASES,
+        "Case opened",
+        &format!("Your {} case '{}' has been opened.", req.case_type, req.subject),
+    ).await;
+
     let case = AfterSalesCase {
         id, order_id: req.order_id.clone(), reporter_id: user.user_id,
         assigned_to: None, case_type: req.case_type.clone(), subject: req.subject.clone(),

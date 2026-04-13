@@ -125,6 +125,14 @@ pub async fn create_order(pool: &State<DbPool>, user: AuthenticatedUser, req: Js
     // Generate initial reconciliation records for the new order
     generate_initial_reconciliation(pool.inner(), &order_id).await;
 
+    crate::notifications::create_notification(
+        pool.inner(),
+        &user.user_id,
+        crate::notifications::PREF_ORDERS,
+        "Order placed",
+        &format!("Your order {} has been placed (total: {:.2}).", order_number, total_amount),
+    ).await;
+
     let order = Order {
         id: order_id, user_id: user.user_id, order_number, subscription_period: req.subscription_period.clone(),
         shipping_address_id: req.shipping_address_id.clone(), status: "pending".to_string(),

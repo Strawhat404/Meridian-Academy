@@ -3,6 +3,7 @@ extern crate rocket;
 
 mod middleware;
 mod models;
+mod notifications;
 mod routes;
 
 use rocket::fairing::AdHoc;
