@@ -45,6 +45,14 @@ else
         cargo"
 fi
 
+# Ensure the backend stack is running before executing tests.
+# The validator stops containers before calling run_tests.sh, so we restart them.
+if ! docker ps --filter "name=meridian_backend" --filter "status=running" --format '{{.Names}}' | grep -q meridian_backend; then
+    echo "  Backend not running — starting stack..."
+    docker compose up -d --wait 2>&1 || true
+    sleep 5
+fi
+
 echo ""
 echo "-----------------------------------------"
 echo "  Running unit tests (unit_tests crate)"

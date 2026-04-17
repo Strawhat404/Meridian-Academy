@@ -22,7 +22,7 @@ pub struct AfterSalesCase {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CaseWithSla {
     pub case: AfterSalesCase,
     pub first_response_overdue: bool,
