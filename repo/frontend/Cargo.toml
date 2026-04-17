@@ -3,16 +3,20 @@ name = "frontend"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["web"]
+web = ["dep:dioxus", "dep:gloo-net", "dep:gloo-storage", "dep:gloo-file", "dep:web-sys", "dep:wasm-logger", "uuid/js"]
+
 [dependencies]
-dioxus = { version = "0.5", features = ["web", "router"] }
+dioxus = { version = "0.5", features = ["web", "router"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
-uuid = { version = "1", features = ["v4", "serde", "js"] }
-gloo-net = "0.5"
-gloo-storage = "0.3"
-gloo-file = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+gloo-net = { version = "0.5", optional = true }
+gloo-storage = { version = "0.3", optional = true }
+gloo-file = { version = "0.3", optional = true }
 base64 = "0.21"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location"], optional = true }
 log = "0.4"
-wasm-logger = "0.2"
+wasm-logger = { version = "0.2", optional = true }

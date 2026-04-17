@@ -1,3 +1,21 @@
+// Additional frontend test modules.
+#[cfg(test)]
+mod ui_logic;
+#[cfg(test)]
+mod contracts;
+// Tests that import REAL frontend modules (validation, formatting, nav_logic, status_display).
+#[cfg(test)]
+mod frontend_validation_tests;
+#[cfg(test)]
+mod frontend_formatting_tests;
+#[cfg(test)]
+mod frontend_nav_tests;
+#[cfg(test)]
+mod frontend_status_tests;
+// Page-level integration tests simulating full component data flows.
+#[cfg(test)]
+mod frontend_page_integration_tests;
+
 #[cfg(test)]
 mod tests {
     use backend::models;

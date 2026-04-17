@@ -1,5 +1,6 @@
 INSERT IGNORE INTO users (id, username, email, password_hash, first_name, last_name, role, is_active, created_at, updated_at)
-VALUES (
+VALUES
+(
     'admin-0001-0001-0001-000000000001',
     'admin',
     'admin@meridian.edu',
@@ -7,6 +8,42 @@ VALUES (
     'System',
     'Administrator',
     'administrator',
+    true,
+    NOW(),
+    NOW()
+),
+(
+    'demo-student-0001-0001-000000000001',
+    'student1',
+    'student1@meridian.edu',
+    '$2b$12$mRZpl.mhwI7cvgCHUq8VteCUT2xegz9dV5.KnxLhfb49ZFKhBym/i',
+    'Jane',
+    'Doe',
+    'student',
+    true,
+    NOW(),
+    NOW()
+),
+(
+    'demo-instructor-0001-000000000001',
+    'instructor1',
+    'instructor1@meridian.edu',
+    '$2b$12$mRZpl.mhwI7cvgCHUq8VteCUT2xegz9dV5.KnxLhfb49ZFKhBym/i',
+    'John',
+    'Smith',
+    'instructor',
+    true,
+    NOW(),
+    NOW()
+),
+(
+    'demo-staff-0001-0001-000000000001',
+    'staff1',
+    'staff1@meridian.edu',
+    '$2b$12$mRZpl.mhwI7cvgCHUq8VteCUT2xegz9dV5.KnxLhfb49ZFKhBym/i',
+    'Alex',
+    'Taylor',
+    'academic_staff',
     true,
     NOW(),
     NOW()

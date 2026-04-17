@@ -130,7 +130,7 @@ async fn run_migrations(pool: &DbPool) {
         match bcrypt::hash(&admin_pass, bcrypt::DEFAULT_COST) {
             Ok(hash) => {
                 let _ = sqlx::query(
-                    "UPDATE users SET password_hash = ? WHERE username IN ('admin', 'moderator', 'host', 'clerk', 'member')"
+                    "UPDATE users SET password_hash = ? WHERE username IN ('admin', 'student1', 'instructor1', 'staff1')"
                 )
                 .bind(&hash)
                 .execute(pool)

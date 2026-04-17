@@ -1,3 +1,9 @@
+// Additional extensive test modules — organized by topic.
+#[cfg(test)]
+mod domain_rules;
+#[cfg(test)]
+mod security;
+
 #[cfg(test)]
 mod tests {
     // Import production modules from the backend crate

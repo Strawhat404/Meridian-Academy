@@ -26,16 +26,16 @@ echo "========================================="
 
 FAILED=0
 
-# Determine how to run cargo: prefer local cargo, fall back to docker
-if command -v cargo &>/dev/null; then
+# Determine how to run cargo.
+# Docker-first: use a containerized Rust toolchain by default to ensure
+# reproducible, isolated test execution. Set USE_LOCAL_CARGO=1 to override.
+if [ "${USE_LOCAL_CARGO:-}" = "1" ] && command -v cargo &>/dev/null; then
     RUN_CARGO="cargo"
-    echo "  Using local cargo: $(cargo --version)"
+    echo "  Using local cargo (USE_LOCAL_CARGO=1): $(cargo --version)"
 else
-    echo "  cargo not found locally — running tests via Docker (rust:1.87-bookworm)"
-    # Ensure the rust image is available
+    echo "  Running tests via Docker (rust:1.87-bookworm)"
     docker pull rust:1.87-bookworm --quiet || true
-    # Wrapper: docker run with the workspace mounted and host network so API tests
-    # can reach the backend at http://localhost:8000
+    # Mount workspace, use host network so API tests reach backend at localhost:8000
     RUN_CARGO="docker run --rm \
         --network host \
         -v ${SCRIPT_DIR}:/workspace \

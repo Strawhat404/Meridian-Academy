@@ -1,3 +1,9 @@
+// Additional API test modules — each groups related end-to-end behavior.
+#[cfg(test)]
+mod flows;
+#[cfg(test)]
+mod security;
+
 #[cfg(test)]
 mod tests {
     use reqwest::Client;
